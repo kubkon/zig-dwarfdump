@@ -12,7 +12,7 @@ debug_str: []const u8,
 pub fn parse(data: []const u8) !Context {
     // Try MachO first
     {
-        const header = @ptrCast(*const macho.mach_header_64, data.ptr).*;
+        const header = @ptrCast(*const macho.mach_header_64, @alignCast(@alignOf(macho.mach_header_64), data.ptr)).*;
         if (header.magic == macho.MH_MAGIC_64) {
             return parseMachO(data);
         }
@@ -21,7 +21,7 @@ pub fn parse(data: []const u8) !Context {
     // Next, let's try ELF
     {
         // TODO: 32bit ELF files
-        const header = @ptrCast(*const elf.Elf64_Ehdr, data.ptr).*;
+        const header = @ptrCast(*const elf.Elf64_Ehdr, @alignCast(@alignOf(elf.Elf64_Ehdr), data.ptr)).*;
         if (mem.eql(u8, "\x7fELF", header.e_ident[0..4])) {
             return parseElf(data);
         }
@@ -31,7 +31,7 @@ pub fn parse(data: []const u8) !Context {
 }
 
 fn parseMachO(data: []const u8) !Context {
-    const header = @ptrCast(*const macho.mach_header_64, data.ptr).*;
+    const header = @ptrCast(*const macho.mach_header_64, @alignCast(@alignOf(macho.mach_header_64), data.ptr)).*;
 
     var debug_info_h: ?macho.section_64 = null;
     var debug_abbrev_h: ?macho.section_64 = null;
@@ -79,7 +79,7 @@ fn parseMachO(data: []const u8) !Context {
 }
 
 fn parseElf(data: []const u8) !Context {
-    const header = @ptrCast(*const elf.Elf64_Ehdr, data.ptr).*;
+    const header = @ptrCast(*const elf.Elf64_Ehdr, @alignCast(@alignOf(elf.Elf64_Ehdr), data.ptr)).*;
 
     const shdrs = @ptrCast(
         [*]const elf.Elf64_Shdr,
