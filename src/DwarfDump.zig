@@ -4,6 +4,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const dwarf = std.dwarf;
 const leb = std.leb;
+const log = std.log;
 const fs = std.fs;
 const mem = std.mem;
 
@@ -36,8 +37,8 @@ pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
 }
 
 pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
-    var cu_it = CompileUnitIterator{};
-    while (try cu_it.next(self.ctx)) |cu| {
+    var cu_it = getCompileUnitIterator(self.ctx);
+    while (try cu_it.next()) |cu| {
         const cuh = cu.value.cuh;
 
         var lookup = AbbrevLookupTable.init(self.gpa);
@@ -58,11 +59,16 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
         });
         try writer.writeByte('\n');
 
-        var children: usize = 0;
-        const indent: usize = 10;
+        if (cuh.version != 4) {
+            log.err("TODO: handle DWARFv5", .{});
+            return error.TODODwarfv5;
+        }
 
-        var abbrev_it = AbbrevEntryIterator{};
-        while (try abbrev_it.next(self.ctx, cu.value, lookup)) |entry| {
+        var children: usize = 0;
+        const max_indent: usize = 20; // TODO: this needs reworking
+
+        var abbrev_it = cu.value.getAbbrevEntryIterator(self.ctx);
+        while (try abbrev_it.next(lookup)) |entry| {
             if (entry.value.tag == 0) {
                 try writer.print("0x{x:0>16}: ", .{entry.off});
                 try formatIndent(children * 2, writer);
@@ -76,11 +82,11 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
             try writer.print("{s}\n", .{formatDIETag(entry.value.tag)});
 
             var low_pc: ?u64 = null;
-            var attr_it = AttributeIterator{};
-            while (try attr_it.next(self.ctx, entry.value, cuh)) |attr| {
+            var attr_it = entry.value.getAttributeIterator(self.ctx, cuh);
+            while (try attr_it.next()) |attr| {
                 try formatIndent(children * 2, writer);
                 try writer.print("{s: <22}{s: <30}", .{ "", formatATName(attr.value.name) });
-                try formatIndent(indent - children * 2, writer);
+                try formatIndent(max_indent - children * 2, writer);
 
                 switch (attr.value.name) {
                     dwarf.AT.high_pc => {
@@ -105,7 +111,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                         switch (attr.value.form) {
                             dwarf.FORM.strp => {
                                 const str = attr.value.getString(self.ctx, cuh) orelse return error.MalformedDwarf;
-                                try writer.print("({s})\n", .{str});
+                                try writer.print("(\"{s}\")\n", .{str});
                             },
                             dwarf.FORM.sec_offset => {
                                 const value = if (cuh.is_64bit)
@@ -185,13 +191,38 @@ fn formatDIETag(tag: u64) []const u8 {
     return switch (tag) {
         std.dwarf.TAG.compile_unit => "DW_TAG_compile_unit",
         std.dwarf.TAG.variable => "DW_TAG_variable",
+        std.dwarf.TAG.subprogram => "DW_TAG_subprogram",
+        std.dwarf.TAG.formal_parameter => "DW_TAG_formal_parameter",
+        std.dwarf.TAG.enumeration_type => "DW_TAG_enumeration_type",
+        std.dwarf.TAG.enumerator => "DW_TAG_enumerator",
+        std.dwarf.TAG.structure_type => "DW_TAG_structure_type",
+        std.dwarf.TAG.union_type => "DW_TAG_union_type",
+        std.dwarf.TAG.member => "DW_TAG_member",
         std.dwarf.TAG.array_type => "DW_TAG_array_type",
         std.dwarf.TAG.subrange_type => "DW_TAG_subrange_type",
-        std.dwarf.TAG.formal_parameter => "DW_TAG_formal_parameter",
-        std.dwarf.TAG.subprogram => "DW_TAG_subprogram",
         std.dwarf.TAG.base_type => "DW_TAG_base_type",
+        std.dwarf.TAG.const_type => "DW_TAG_const_type",
+        std.dwarf.TAG.packed_type => "DW_TAG_packed_type",
         std.dwarf.TAG.pointer_type => "DW_TAG_pointer_type",
-        else => "DW_TAG_unknown", // TODO
+        std.dwarf.TAG.reference_type => "DW_TAG_reference_type",
+        std.dwarf.TAG.restrict_type => "DW_TAG_restrict_type",
+        std.dwarf.TAG.rvalue_reference_type => "DW_TAG_rvalue_reference_type",
+        std.dwarf.TAG.shared_type => "DW_TAG_shared_type",
+        std.dwarf.TAG.volatile_type => "DW_TAG_volatile_type",
+        std.dwarf.TAG.typedef => "DW_TAG_typedef",
+        std.dwarf.TAG.lexical_block => "DW_TAG_lexical_block",
+        std.dwarf.TAG.subroutine_type => "DW_TAG_subroutine_type",
+        std.dwarf.TAG.inlined_subroutine => "DW_TAG_inlined_subroutine",
+        std.dwarf.TAG.unspecified_parameters => "DW_TAG_unspecified_parameters",
+        std.dwarf.TAG.label => "DW_TAG_label",
+
+        0x4109 => "DW_TAG_GNU_call_site",
+        0x410a => "DW_TAG_GNU_call_site_parameter",
+
+        else => blk: {
+            log.debug("TODO: unhandled TAG value: {x}", .{tag});
+            break :blk "DW_TAG_unknown";
+        },
     };
 }
 
@@ -211,14 +242,33 @@ fn formatATName(at: u64) []const u8 {
         std.dwarf.AT.count => "DW_AT_count",
         std.dwarf.AT.encoding => "DW_AT_encoding",
         std.dwarf.AT.byte_size => "DW_AT_byte_size",
+        std.dwarf.AT.bit_size => "DW_AT_bit_size",
+        std.dwarf.AT.bit_offset => "DW_AT_bit_offset",
         std.dwarf.AT.prototyped => "DW_AT_prototyped",
         std.dwarf.AT.frame_base => "DW_AT_framebase",
         std.dwarf.AT.external => "DW_AT_external",
+        std.dwarf.AT.data_member_location => "DW_AT_data_member_location",
+        std.dwarf.AT.const_value => "DW_AT_const_value",
+        std.dwarf.AT.declaration => "DW_AT_declaration",
+        std.dwarf.AT.abstract_origin => "DW_AT_abstract_origin",
+        std.dwarf.AT.ranges => "DW_AT_ranges",
+        std.dwarf.AT.@"inline" => "DW_AT_inline",
+        std.dwarf.AT.call_file => "DW_AT_call_file",
+        std.dwarf.AT.call_line => "DW_AT_call_line",
+        std.dwarf.AT.call_column => "DW_AT_call_column",
+        std.dwarf.AT.linkage_name => "DW_AT_linkage_name",
+        std.dwarf.AT.artificial => "DW_AT_artificial",
 
+        0x2111 => "DW_AT_GNU_call_site_value",
+        0x2115 => "DW_AT_GNU_tail_cail",
+        0x2117 => "DW_AT_GNU_all_call_sites",
         0x3e02 => "DW_AT_LLVM_sysroot",
         0x3fef => "DW_AT_APPLE_sdk",
 
-        else => "DW_AT_unknown", // TODO
+        else => blk: {
+            log.debug("TODO: unhandled AT value: {x}", .{at});
+            break :blk "DW_AT_unknown";
+        },
     };
 }
 
@@ -230,13 +280,18 @@ fn result(off: usize, value: anytype) Result(@TypeOf(value)) {
     return .{ .off = off, .value = value };
 }
 
+fn getCompileUnitIterator(self: Context) CompileUnitIterator {
+    return .{ .ctx = self };
+}
+
 const CompileUnitIterator = struct {
+    ctx: Context,
     pos: usize = 0,
 
-    fn next(self: *CompileUnitIterator, ctx: Context) !?Result(CompileUnit) {
-        if (self.pos >= ctx.debug_info.len) return null;
+    fn next(self: *CompileUnitIterator) !?Result(CompileUnit) {
+        if (self.pos >= self.ctx.debug_info.len) return null;
 
-        var stream = std.io.fixedBufferStream(ctx.debug_info);
+        var stream = std.io.fixedBufferStream(self.ctx.debug_info);
         var creader = std.io.countingReader(stream.reader());
         const reader = creader.reader();
 
@@ -255,79 +310,26 @@ const CompileUnitIterator = struct {
     }
 };
 
-fn findCompileUnit(ctx: Context, address: u64) !?CompileUnit {
-    var cu_it = CompileUnitIterator{};
-
-    while (try cu_it.next(ctx)) |cu| {
-        const maybe_cu_entry: ?AbbrevEntry = while (try cu.nextAbbrevEntry()) |entry| switch (entry.tag) {
-            dwarf.TAG.compile_unit => break entry,
-            else => continue,
-        } else null;
-
-        var cu_entry = maybe_cu_entry orelse continue;
-
-        var maybe_low_pc: ?u64 = null;
-        var maybe_high_pc: ?u64 = null;
-        while (try cu_entry.nextAttribute()) |attr| switch (attr.name) {
-            dwarf.AT.low_pc => {
-                if (attr.getAddr(cu.cuh)) |addr| {
-                    maybe_low_pc = addr;
-                    continue;
-                }
-                if (try attr.getConstant()) |constant| {
-                    maybe_low_pc = @intCast(u64, constant);
-                    continue;
-                }
-                unreachable;
-            },
-            dwarf.AT.high_pc => {
-                if (attr.getAddr(cu.cuh)) |addr| {
-                    maybe_high_pc = addr;
-                    continue;
-                }
-                if (try attr.getConstant()) |constant| {
-                    const casted = @intCast(u64, constant);
-                    maybe_high_pc = if (maybe_low_pc) |lc| lc + casted else casted;
-                    continue;
-                }
-            },
-            else => {},
-        };
-
-        const low_pc = maybe_low_pc orelse continue;
-        const high_pc = maybe_high_pc orelse continue;
-
-        if (low_pc <= address and address < high_pc) return cu;
-    }
-
-    return null;
-}
-
 fn genAbbrevLookupByKind(ctx: Context, off: usize, lookup: *AbbrevLookupTable) !void {
     const data = ctx.debug_abbrev[off..];
     var stream = std.io.fixedBufferStream(data);
     var creader = std.io.countingReader(stream.reader());
     const reader = creader.reader();
 
-    var open_scope = false;
     while (true) {
         const kind = try leb.readULEB128(u64, reader);
-        if (kind == 0) {
-            if (open_scope) return error.MalformedDwarf;
-            break;
-        }
-        open_scope = true;
+
+        if (kind == 0) break;
 
         const pos = creader.bytes_read;
+        _ = try leb.readULEB128(u64, reader); // TAG
+        _ = try reader.readByte(); // CHILDREN
 
         while (true) {
-            const byte = try reader.readByte();
-            if (byte == 0) {
-                if ((try reader.readByte()) == 0x0) {
-                    open_scope = false;
-                    break;
-                }
-            }
+            const name = try leb.readULEB128(u64, reader);
+            const form = try leb.readULEB128(u64, reader);
+
+            if (name == 0 and form == 0) break;
         }
 
         try lookup.putNoClobber(kind, .{
@@ -376,28 +378,46 @@ const CompileUnit = struct {
     inline fn getDebugInfo(self: CompileUnit, ctx: Context) []const u8 {
         return ctx.debug_info[self.debug_info_off..][0..self.cuh.length];
     }
+
+    fn getAbbrevEntryIterator(self: CompileUnit, ctx: Context) AbbrevEntryIterator {
+        return .{ .ctx = ctx, .cu = self };
+    }
 };
 
 const AbbrevEntryIterator = struct {
+    ctx: Context,
+    cu: CompileUnit,
     pos: usize = 0,
 
-    fn next(self: *AbbrevEntryIterator, ctx: Context, cu: CompileUnit, lookup: AbbrevLookupTable) !?Result(AbbrevEntry) {
-        if (self.pos + cu.debug_info_off >= ctx.debug_info.len) return null;
+    fn next(self: *AbbrevEntryIterator, lookup: AbbrevLookupTable) !?Result(AbbrevEntry) {
+        if (self.pos + self.cu.debug_info_off >= self.ctx.debug_info.len) return null;
 
-        const kind = ctx.debug_info[self.pos + cu.debug_info_off];
+        const kind = self.ctx.debug_info[self.pos + self.cu.debug_info_off];
         self.pos += 1;
 
         if (kind == 0) {
-            return result(self.pos + cu.debug_info_off - 1, AbbrevEntry.@"null"());
+            return result(self.pos + self.cu.debug_info_off - 1, AbbrevEntry.@"null"());
         }
 
         const abbrev_pos = lookup.get(kind) orelse return error.MalformedDwarf;
-        const len = try findAbbrevEntrySize(ctx, abbrev_pos.pos, abbrev_pos.len, self.pos + cu.debug_info_off, cu.cuh);
-        const entry = try getAbbrevEntry(ctx, abbrev_pos.pos, abbrev_pos.len, self.pos + cu.debug_info_off, len);
+        const len = try findAbbrevEntrySize(
+            self.ctx,
+            abbrev_pos.pos,
+            abbrev_pos.len,
+            self.pos + self.cu.debug_info_off,
+            self.cu.cuh,
+        );
+        const entry = try getAbbrevEntry(
+            self.ctx,
+            abbrev_pos.pos,
+            abbrev_pos.len,
+            self.pos + self.cu.debug_info_off,
+            len,
+        );
 
         self.pos += len;
 
-        return result(self.pos + cu.debug_info_off - len - 1, entry);
+        return result(self.pos + self.cu.debug_info_off - len - 1, entry);
     }
 };
 
@@ -430,6 +450,10 @@ const AbbrevEntry = struct {
 
     inline fn getDebugAbbrev(self: AbbrevEntry, ctx: Context) []const u8 {
         return ctx.debug_abbrev[self.debug_abbrev_off..][0..self.debug_abbrev_len];
+    }
+
+    fn getAttributeIterator(self: AbbrevEntry, ctx: Context, cuh: CompileUnit.Header) AttributeIterator {
+        return .{ .entry = self, .ctx = ctx, .cuh = cuh };
     }
 };
 
@@ -498,11 +522,14 @@ const Attribute = struct {
 };
 
 const AttributeIterator = struct {
+    entry: AbbrevEntry,
+    ctx: Context,
+    cuh: CompileUnit.Header,
     debug_abbrev_pos: usize = 0,
     debug_info_pos: usize = 0,
 
-    fn next(self: *AttributeIterator, ctx: Context, entry: AbbrevEntry, cuh: CompileUnit.Header) !?Result(Attribute) {
-        const debug_abbrev = entry.getDebugAbbrev(ctx);
+    fn next(self: *AttributeIterator) !?Result(Attribute) {
+        const debug_abbrev = self.entry.getDebugAbbrev(self.ctx);
         if (self.debug_abbrev_pos >= debug_abbrev.len) return null;
 
         var stream = std.io.fixedBufferStream(debug_abbrev[self.debug_abbrev_pos..]);
@@ -515,17 +542,17 @@ const AttributeIterator = struct {
         self.debug_abbrev_pos += creader.bytes_read;
 
         const len = try findFormSize(
-            ctx,
+            self.ctx,
             form,
-            self.debug_info_pos + entry.debug_info_off,
-            entry.debug_info_len - self.debug_info_pos,
-            cuh,
+            self.debug_info_pos + self.entry.debug_info_off,
+            self.entry.debug_info_len - self.debug_info_pos,
+            self.cuh,
         );
         const attr = Attribute{
             .name = name,
             .form = form,
-            .debug_info_off = self.debug_info_pos + entry.debug_info_off,
-            .debug_info_len = entry.debug_info_len - self.debug_info_pos,
+            .debug_info_off = self.debug_info_pos + self.entry.debug_info_off,
+            .debug_info_len = self.entry.debug_info_len - self.debug_info_pos,
         };
 
         self.debug_info_pos += len;
@@ -541,7 +568,18 @@ fn getAbbrevEntry(ctx: Context, da_off: usize, da_len: usize, di_off: usize, di_
     const reader = creader.reader();
 
     const tag = try leb.readULEB128(u64, reader);
-    const children = try reader.readByte();
+    const children = switch (tag) {
+        std.dwarf.TAG.const_type,
+        std.dwarf.TAG.packed_type,
+        std.dwarf.TAG.pointer_type,
+        std.dwarf.TAG.reference_type,
+        std.dwarf.TAG.restrict_type,
+        std.dwarf.TAG.rvalue_reference_type,
+        std.dwarf.TAG.shared_type,
+        std.dwarf.TAG.volatile_type,
+        => if (creader.bytes_read == da_len) std.dwarf.CHILDREN.no else try reader.readByte(),
+        else => try reader.readByte(),
+    };
 
     return AbbrevEntry{
         .tag = tag,
@@ -608,8 +646,19 @@ fn findAbbrevEntrySize(ctx: Context, da_off: usize, da_len: usize, di_off: usize
     var creader = std.io.countingReader(stream.reader());
     const reader = creader.reader();
 
-    _ = try leb.readULEB128(u64, reader);
-    _ = try reader.readByte();
+    const tag = try leb.readULEB128(u64, reader);
+    _ = switch (tag) {
+        std.dwarf.TAG.const_type,
+        std.dwarf.TAG.packed_type,
+        std.dwarf.TAG.pointer_type,
+        std.dwarf.TAG.reference_type,
+        std.dwarf.TAG.restrict_type,
+        std.dwarf.TAG.rvalue_reference_type,
+        std.dwarf.TAG.shared_type,
+        std.dwarf.TAG.volatile_type,
+        => if (creader.bytes_read != da_len) try reader.readByte(),
+        else => try reader.readByte(),
+    };
 
     var len: usize = 0;
     while (creader.bytes_read < debug_abbrev.len) {
