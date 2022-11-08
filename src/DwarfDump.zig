@@ -89,6 +89,17 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                 try formatIndent(max_indent - children * 2, writer);
 
                 switch (attr.value.name) {
+                    dwarf.AT.stmt_list => {
+                        const sec_offset = attr.value.getSecOffset(self.ctx, cuh) orelse return error.MalformedDwarf;
+                        try writer.print("({x:0>16})\n", .{sec_offset});
+                    },
+
+                    dwarf.AT.low_pc => {
+                        const addr = attr.value.getAddr(self.ctx, cuh) orelse return error.MalformedDwarf;
+                        low_pc = addr;
+                        try writer.print("({x:0>16})\n", .{addr});
+                    },
+
                     dwarf.AT.high_pc => {
                         if (try attr.value.getConstant(self.ctx)) |offset| {
                             try writer.print("({x:0>16})\n", .{offset + low_pc.?});
@@ -96,76 +107,53 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                             try writer.print("({x:0>16})\n", .{addr});
                         } else return error.MalformedDwarf;
                     },
+
                     dwarf.AT.@"type" => {
                         const off = (try attr.value.getReference(self.ctx)) orelse return error.MalformedDwarf;
                         try writer.print("({x})\n", .{off});
                     },
-                    dwarf.AT.name => {
+
+                    dwarf.AT.comp_dir,
+                    dwarf.AT.producer,
+                    dwarf.AT.name,
+                    => {
                         const str = attr.value.getString(self.ctx, cuh) orelse return error.MalformedDwarf;
                         try writer.print("(\"{s}\")\n", .{str});
                     },
-                    else => {
-                        if (try attr.value.getConstant(self.ctx)) |constant| {
-                            try writer.print("({x})\n", .{constant});
-                            continue;
+
+                    dwarf.AT.language,
+                    dwarf.AT.calling_convention,
+                    dwarf.AT.encoding,
+                    dwarf.AT.decl_column,
+                    dwarf.AT.decl_file,
+                    dwarf.AT.decl_line,
+                    => {
+                        const value = try attr.value.getConstant(self.ctx) orelse return error.MalformedDwarf;
+                        try writer.print("({x:0>16})\n", .{value});
+                    },
+
+                    dwarf.AT.location => {
+                        if (try attr.value.getExprloc(self.ctx)) |list| {
+                            try writer.print("(<0x{x}> {x})\n", .{ list.len, std.fmt.fmtSliceHexLower(list) });
+                        } else {
+                            try writer.print("error: TODO check and parse loclist\n", .{});
                         }
-                        if (try attr.value.getReference(self.ctx)) |off| {
+                    },
+
+                    dwarf.AT.byte_size,
+                    dwarf.AT.bit_size,
+                    => {
+                        if (try attr.value.getConstant(self.ctx)) |value| {
+                            try writer.print("({x})\n", .{value});
+                        } else if (try attr.value.getReference(self.ctx)) |off| {
                             try writer.print("({x})\n", .{off});
-                            continue;
-                        }
-                        switch (attr.value.form) {
-                            dwarf.FORM.strp => {
-                                const str = attr.value.getString(self.ctx, cuh) orelse return error.MalformedDwarf;
-                                try writer.print("(\"{s}\")\n", .{str});
-                            },
-                            dwarf.FORM.sec_offset => {
-                                const value = if (cuh.is_64bit)
-                                    mem.readIntLittle(u64, attr.value.getDebugInfo(self.ctx)[0..8])
-                                else
-                                    mem.readIntLittle(u32, attr.value.getDebugInfo(self.ctx)[0..4]);
-                                try writer.print("({x:0>16})\n", .{value});
-                            },
-                            dwarf.FORM.addr => {
-                                const value = attr.value.getAddr(self.ctx, cuh) orelse return error.MalformedDwarf;
-                                try writer.print("({x:0>16})\n", .{value});
+                        } else if (try attr.value.getExprloc(self.ctx)) |list| {
+                            try writer.print("(<0x{x}> {x})\n", .{ list.len, std.fmt.fmtSliceHexLower(list) });
+                        } else return error.MalformedDwarf;
+                    },
 
-                                if (attr.value.name == dwarf.AT.low_pc) {
-                                    low_pc = value;
-                                }
-                            },
-                            dwarf.FORM.exprloc => {
-                                var stream = std.io.fixedBufferStream(attr.value.getDebugInfo(self.ctx));
-                                const reader = stream.reader();
-                                const expr_len = try leb.readULEB128(u64, reader);
-                                var i: u64 = 0;
-                                try writer.writeAll("( ");
-                                while (i < expr_len) : (i += 1) {
-                                    const byte = try reader.readByte();
-                                    try writer.print("{x} ", .{byte});
-                                }
-                                try writer.writeAll(")\n");
-                            },
-                            dwarf.FORM.flag_present => {
-                                try writer.writeAll("(true)\n");
-                            },
-
-                            dwarf.FORM.data1,
-                            dwarf.FORM.data2,
-                            dwarf.FORM.data4,
-                            dwarf.FORM.data8,
-                            dwarf.FORM.udata,
-                            dwarf.FORM.sdata,
-                            => unreachable,
-
-                            dwarf.FORM.ref1,
-                            dwarf.FORM.ref2,
-                            dwarf.FORM.ref4,
-                            dwarf.FORM.ref8,
-                            dwarf.FORM.ref_udata,
-                            => unreachable,
-
-                            else => {},
-                        }
+                    else => {
+                        try writer.print("error: unhandled form 0x{x}\n", .{attr.value.form});
                     },
                 }
             }
@@ -497,6 +485,16 @@ const Attribute = struct {
         }
     }
 
+    fn getSecOffset(self: Attribute, ctx: Context, cuh: CompileUnit.Header) ?u64 {
+        if (self.form != dwarf.FORM.sec_offset) return null;
+        const debug_info = self.getDebugInfo(ctx);
+        const value = if (cuh.is_64bit)
+            mem.readIntLittle(u64, debug_info[0..8])
+        else
+            mem.readIntLittle(u32, debug_info[0..4]);
+        return value;
+    }
+
     fn getConstant(self: Attribute, ctx: Context) !?i128 {
         const debug_info = self.getDebugInfo(ctx);
         var stream = std.io.fixedBufferStream(debug_info);
@@ -539,6 +537,20 @@ const Attribute = struct {
             else => unreachable,
         };
     }
+
+    fn getExprloc(self: Attribute, ctx: Context) !?[]const u8 {
+        if (self.form != dwarf.FORM.exprloc) return null;
+        const debug_info = self.getDebugInfo(ctx);
+        var stream = std.io.fixedBufferStream(debug_info);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+        const expr_len = try leb.readULEB128(u64, reader);
+        return debug_info[creader.bytes_read..][0..expr_len];
+    }
+
+    // fn getBlock(self: Attribute, ctx: Context) ?[]const u8 {
+    //     const debug_info = self.get
+    // }
 };
 
 const AttributeIterator = struct {
