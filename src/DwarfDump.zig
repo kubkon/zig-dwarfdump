@@ -635,10 +635,30 @@ fn findFormSize(ctx: Context, form: u64, di_off: usize, cuh: CompileUnit.Header)
         => if (cuh.is_64bit) @sizeOf(u64) else @sizeOf(u32),
 
         dwarf.FORM.addr => cuh.address_size,
-        dwarf.FORM.exprloc => blk: {
-            const expr_len = try leb.readULEB128(u64, reader);
+
+        dwarf.FORM.block1,
+        dwarf.FORM.block2,
+        dwarf.FORM.block4,
+        dwarf.FORM.block,
+        => blk: {
+            const len: u64 = switch (form) {
+                dwarf.FORM.block1 => try reader.readIntLittle(u8),
+                dwarf.FORM.block2 => try reader.readIntLittle(u16),
+                dwarf.FORM.block4 => try reader.readIntLittle(u32),
+                dwarf.FORM.block => try leb.readULEB128(u64, reader),
+                else => unreachable,
+            };
             var i: u64 = 0;
-            while (i < expr_len) : (i += 1) {
+            while (i < len) : (i += 1) {
+                _ = try reader.readByte();
+            }
+            break :blk creader.bytes_read;
+        },
+
+        dwarf.FORM.exprloc => blk: {
+            const len = try leb.readULEB128(u64, reader);
+            var i: u64 = 0;
+            while (i < len) : (i += 1) {
                 _ = try reader.readByte();
             }
             break :blk creader.bytes_read;
@@ -647,18 +667,15 @@ fn findFormSize(ctx: Context, form: u64, di_off: usize, cuh: CompileUnit.Header)
 
         dwarf.FORM.data1,
         dwarf.FORM.ref1,
-        dwarf.FORM.block1,
         dwarf.FORM.flag,
         => @sizeOf(u8),
 
         dwarf.FORM.data2,
         dwarf.FORM.ref2,
-        dwarf.FORM.block2,
         => @sizeOf(u16),
 
         dwarf.FORM.data4,
         dwarf.FORM.ref4,
-        dwarf.FORM.block4,
         => @sizeOf(u32),
 
         dwarf.FORM.data8,
@@ -668,7 +685,6 @@ fn findFormSize(ctx: Context, form: u64, di_off: usize, cuh: CompileUnit.Header)
 
         dwarf.FORM.udata,
         dwarf.FORM.ref_udata,
-        dwarf.FORM.block,
         => blk: {
             _ = try leb.readULEB128(u64, reader);
             break :blk creader.bytes_read;
