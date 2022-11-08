@@ -45,15 +45,16 @@ fn parseMachO(data: []const u8) !Context {
     while (it.next()) |lc| switch (lc.cmd()) {
         .SEGMENT_64 => {
             for (lc.getSections()) |sect| {
-                if (!sect.isDebug()) continue;
-                if (mem.eql(u8, sect.sectName(), "__debug_info")) {
-                    debug_info_h = sect;
-                }
-                if (mem.eql(u8, sect.sectName(), "__debug_abbrev")) {
-                    debug_abbrev_h = sect;
-                }
-                if (mem.eql(u8, sect.sectName(), "__debug_str")) {
-                    debug_string_h = sect;
+                if (mem.eql(u8, sect.segName(), "__DWARF")) {
+                    if (mem.eql(u8, sect.sectName(), "__debug_info")) {
+                        debug_info_h = sect;
+                    }
+                    if (mem.eql(u8, sect.sectName(), "__debug_abbrev")) {
+                        debug_abbrev_h = sect;
+                    }
+                    if (mem.eql(u8, sect.sectName(), "__debug_str")) {
+                        debug_string_h = sect;
+                    }
                 }
             }
         },
