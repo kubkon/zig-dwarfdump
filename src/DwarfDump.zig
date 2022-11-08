@@ -90,14 +90,19 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
 
                 switch (attr.value.name) {
                     dwarf.AT.high_pc => {
-                        const value = (try attr.value.getConstant(self.ctx)) orelse return error.MalformedDwarf;
-                        if (low_pc) |base| {
-                            try writer.print("({x:0>16})\n", .{value + base});
-                        }
+                        if (try attr.value.getConstant(self.ctx)) |offset| {
+                            try writer.print("({x:0>16})\n", .{offset + low_pc.?});
+                        } else if (attr.value.getAddr(self.ctx, cuh)) |addr| {
+                            try writer.print("({x:0>16})\n", .{addr});
+                        } else return error.MalformedDwarf;
                     },
                     dwarf.AT.@"type" => {
                         const off = (try attr.value.getReference(self.ctx)) orelse return error.MalformedDwarf;
                         try writer.print("({x})\n", .{off});
+                    },
+                    dwarf.AT.name => {
+                        const str = attr.value.getString(self.ctx, cuh) orelse return error.MalformedDwarf;
+                        try writer.print("(\"{s}\")\n", .{str});
                     },
                     else => {
                         if (try attr.value.getConstant(self.ctx)) |constant| {
@@ -215,6 +220,7 @@ fn formatDIETag(tag: u64) []const u8 {
         std.dwarf.TAG.inlined_subroutine => "DW_TAG_inlined_subroutine",
         std.dwarf.TAG.unspecified_parameters => "DW_TAG_unspecified_parameters",
         std.dwarf.TAG.label => "DW_TAG_label",
+        std.dwarf.TAG.unspecified_type => "DW_TAG_unspecified_type",
 
         0x4109 => "DW_TAG_GNU_call_site",
         0x410a => "DW_TAG_GNU_call_site_parameter",
@@ -474,13 +480,21 @@ const Attribute = struct {
     }
 
     fn getString(self: Attribute, ctx: Context, cuh: CompileUnit.Header) ?[]const u8 {
-        if (self.form != dwarf.FORM.strp) return null;
         const debug_info = self.getDebugInfo(ctx);
-        const off = if (cuh.is_64bit)
-            mem.readIntLittle(u64, debug_info[0..8])
-        else
-            mem.readIntLittle(u32, debug_info[0..4]);
-        return getDwarfString(ctx.debug_str, off);
+
+        switch (self.form) {
+            dwarf.FORM.string => {
+                return mem.sliceTo(@ptrCast([*:0]const u8, debug_info.ptr), 0);
+            },
+            dwarf.FORM.strp => {
+                const off = if (cuh.is_64bit)
+                    mem.readIntLittle(u64, debug_info[0..8])
+                else
+                    mem.readIntLittle(u32, debug_info[0..4]);
+                return getDwarfString(ctx.debug_str, off);
+            },
+            else => return null,
+        }
     }
 
     fn getConstant(self: Attribute, ctx: Context) !?i128 {
@@ -655,8 +669,9 @@ fn findFormSize(ctx: Context, form: u64, di_off: usize, cuh: CompileUnit.Header)
 
         dwarf.FORM.string => blk: {
             var count: usize = 0;
-            while (true) : (count += 1) {
+            while (true) {
                 const byte = try reader.readByte();
+                count += 1;
                 if (byte == 0x0) break;
             }
             break :blk count;
