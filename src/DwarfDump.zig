@@ -89,7 +89,9 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                 try formatIndent(max_indent - children * 2, writer);
 
                 switch (attr.value.name) {
-                    dwarf.AT.stmt_list => {
+                    dwarf.AT.stmt_list,
+                    dwarf.AT.ranges,
+                    => {
                         const sec_offset = attr.value.getSecOffset(self.ctx, cuh) orelse return error.MalformedDwarf;
                         try writer.print("({x:0>16})\n", .{sec_offset});
                     },
@@ -108,7 +110,9 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                         } else return error.MalformedDwarf;
                     },
 
-                    dwarf.AT.@"type" => {
+                    dwarf.AT.@"type",
+                    dwarf.AT.abstract_origin,
+                    => {
                         const off = (try attr.value.getReference(self.ctx)) orelse return error.MalformedDwarf;
                         try writer.print("({x})\n", .{off});
                     },
@@ -116,6 +120,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                     dwarf.AT.comp_dir,
                     dwarf.AT.producer,
                     dwarf.AT.name,
+                    dwarf.AT.linkage_name,
                     => {
                         const str = attr.value.getString(self.ctx, cuh) orelse return error.MalformedDwarf;
                         try writer.print("(\"{s}\")\n", .{str});
@@ -127,17 +132,55 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                     dwarf.AT.decl_column,
                     dwarf.AT.decl_file,
                     dwarf.AT.decl_line,
+                    dwarf.AT.alignment,
+                    dwarf.AT.data_bit_offset,
+                    dwarf.AT.call_file,
+                    dwarf.AT.call_line,
+                    dwarf.AT.call_column,
+                    dwarf.AT.@"inline",
                     => {
                         const value = try attr.value.getConstant(self.ctx) orelse return error.MalformedDwarf;
                         try writer.print("({x:0>16})\n", .{value});
                     },
 
-                    dwarf.AT.location => {
+                    dwarf.AT.location,
+                    dwarf.AT.frame_base,
+                    => {
                         if (try attr.value.getExprloc(self.ctx)) |list| {
                             try writer.print("(<0x{x}> {x})\n", .{ list.len, std.fmt.fmtSliceHexLower(list) });
                         } else {
                             try writer.print("error: TODO check and parse loclist\n", .{});
                         }
+                    },
+
+                    dwarf.AT.data_member_location => {
+                        if (try attr.value.getConstant(self.ctx)) |value| {
+                            try writer.print("({x:0>16})\n", .{value});
+                        } else if (try attr.value.getExprloc(self.ctx)) |list| {
+                            try writer.print("(<0x{x}> {x})\n", .{ list.len, std.fmt.fmtSliceHexLower(list) });
+                        } else {
+                            try writer.print("error: TODO check and parse loclist\n", .{});
+                        }
+                    },
+
+                    dwarf.AT.const_value => {
+                        if (try attr.value.getConstant(self.ctx)) |value| {
+                            try writer.print("({x:0>16})\n", .{value});
+                        } else if (attr.value.getString(self.ctx, cuh)) |str| {
+                            try writer.print("(\"{s}\")\n", .{str});
+                        } else {
+                            try writer.print("error: TODO check and parse block\n", .{});
+                        }
+                    },
+
+                    dwarf.AT.count => {
+                        if (try attr.value.getConstant(self.ctx)) |value| {
+                            try writer.print("({x:0>16})\n", .{value});
+                        } else if (try attr.value.getExprloc(self.ctx)) |list| {
+                            try writer.print("(<0x{x}> {x})\n", .{ list.len, std.fmt.fmtSliceHexLower(list) });
+                        } else if (try attr.value.getReference(self.ctx)) |off| {
+                            try writer.print("({x:0>16})\n", .{off});
+                        } else return error.MalformedDwarf;
                     },
 
                     dwarf.AT.byte_size,
@@ -152,8 +195,15 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                         } else return error.MalformedDwarf;
                     },
 
+                    dwarf.AT.@"noreturn",
+                    dwarf.AT.external,
+                    => {
+                        const flag = attr.value.getFlag(self.ctx) orelse return error.MalformedDwarf;
+                        try writer.print("{}\n", .{flag});
+                    },
+
                     else => {
-                        try writer.print("error: unhandled form 0x{x}\n", .{attr.value.form});
+                        try writer.print("error: unhandled form 0x{x} for attribute\n", .{attr.value.form});
                     },
                 }
             }
@@ -239,7 +289,7 @@ fn formatATName(at: u64) []const u8 {
         std.dwarf.AT.bit_size => "DW_AT_bit_size",
         std.dwarf.AT.bit_offset => "DW_AT_bit_offset",
         std.dwarf.AT.prototyped => "DW_AT_prototyped",
-        std.dwarf.AT.frame_base => "DW_AT_framebase",
+        std.dwarf.AT.frame_base => "DW_AT_frame_base",
         std.dwarf.AT.external => "DW_AT_external",
         std.dwarf.AT.data_member_location => "DW_AT_data_member_location",
         std.dwarf.AT.const_value => "DW_AT_const_value",
@@ -252,6 +302,9 @@ fn formatATName(at: u64) []const u8 {
         std.dwarf.AT.call_column => "DW_AT_call_column",
         std.dwarf.AT.linkage_name => "DW_AT_linkage_name",
         std.dwarf.AT.artificial => "DW_AT_artificial",
+        std.dwarf.AT.data_bit_offset => "DW_AT_data_bit_offset",
+        std.dwarf.AT.@"noreturn" => "DW_AT_noreturn",
+        std.dwarf.AT.alignment => "DW_AT_alignment",
 
         0x2111 => "DW_AT_GNU_call_site_value",
         0x2113 => "DW_AT_GNU_call_site_target",
@@ -465,6 +518,16 @@ const Attribute = struct {
 
     inline fn getDebugInfo(self: Attribute, ctx: Context) []const u8 {
         return ctx.debug_info[self.debug_info_off..][0..self.debug_info_len];
+    }
+
+    fn getFlag(self: Attribute, ctx: Context) ?bool {
+        const debug_info = self.getDebugInfo(ctx);
+
+        switch (self.form) {
+            dwarf.FORM.flag => return debug_info[0] == 1,
+            dwarf.FORM.flag_present => return true,
+            else => return null,
+        }
     }
 
     fn getString(self: Attribute, ctx: Context, cuh: CompileUnit.Header) ?[]const u8 {
