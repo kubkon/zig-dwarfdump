@@ -108,7 +108,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                         } else return error.MalformedDwarf;
                     },
 
-                    dwarf.AT.@"type",
+                    dwarf.AT.type,
                     dwarf.AT.abstract_origin,
                     => {
                         const off = (try attr.value.getReference(self.ctx)) orelse return error.MalformedDwarf;
@@ -193,7 +193,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                         } else return error.MalformedDwarf;
                     },
 
-                    dwarf.AT.@"noreturn",
+                    dwarf.AT.noreturn,
                     dwarf.AT.external,
                     => {
                         const flag = attr.value.getFlag(self.ctx) orelse return error.MalformedDwarf;
@@ -277,7 +277,7 @@ fn formatATName(at: u64) []const u8 {
         std.dwarf.AT.comp_dir => "DW_AT_comp_dir",
         std.dwarf.AT.low_pc => "DW_AT_low_pc",
         std.dwarf.AT.high_pc => "DW_AT_high_pc",
-        std.dwarf.AT.@"type" => "DW_AT_type",
+        std.dwarf.AT.type => "DW_AT_type",
         std.dwarf.AT.decl_file => "DW_AT_decl_file",
         std.dwarf.AT.decl_line => "DW_AT_decl_line",
         std.dwarf.AT.location => "DW_AT_location",
@@ -301,7 +301,7 @@ fn formatATName(at: u64) []const u8 {
         std.dwarf.AT.linkage_name => "DW_AT_linkage_name",
         std.dwarf.AT.artificial => "DW_AT_artificial",
         std.dwarf.AT.data_bit_offset => "DW_AT_data_bit_offset",
-        std.dwarf.AT.@"noreturn" => "DW_AT_noreturn",
+        std.dwarf.AT.noreturn => "DW_AT_noreturn",
         std.dwarf.AT.alignment => "DW_AT_alignment",
 
         0x2111 => "DW_AT_GNU_call_site_value",
@@ -447,7 +447,7 @@ const AbbrevEntryIterator = struct {
         self.pos += creader.bytes_read;
 
         if (kind == 0) {
-            return result(self.pos + self.cu.debug_info_off - creader.bytes_read, AbbrevEntry.@"null"());
+            return result(self.pos + self.cu.debug_info_off - creader.bytes_read, AbbrevEntry.null());
         }
 
         const abbrev_pos = lookup.get(kind) orelse return error.MalformedDwarf;
