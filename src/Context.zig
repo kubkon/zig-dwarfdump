@@ -4,8 +4,9 @@ const std = @import("std");
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
-const Elf = @import("Context/Elf.zig");
-const MachO = @import("Context/MachO.zig");
+
+pub const Elf = @import("Context/Elf.zig");
+pub const MachO = @import("Context/MachO.zig");
 
 tag: Tag,
 data: []const u8,

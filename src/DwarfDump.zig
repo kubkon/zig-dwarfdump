@@ -808,3 +808,19 @@ fn getDwarfString(debug_str: []const u8, off: u64) []const u8 {
     assert(off < debug_str.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, debug_str.ptr + off), 0);
 }
+
+pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
+    switch (self.ctx.tag) {
+        .elf => return error.Unimplemented,
+        .macho => {},
+    }
+
+    const macho = self.ctx.cast(Context.MachO).?;
+    const sect = macho.getSectionByName("__TEXT", "__eh_frame") orelse {
+        try writer.print("\nNo __TEXT,__eh_frame section.\n", .{});
+        return;
+    };
+
+    const data = macho.getSectionData(sect);
+    log.warn("{x}", .{std.fmt.fmtSliceHexLower(data)});
+}

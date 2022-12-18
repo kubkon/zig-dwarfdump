@@ -92,6 +92,26 @@ pub fn getDebugAbbrevData(macho: *const MachO) []const u8 {
     return macho.debug_abbrev;
 }
 
+pub fn getSectionByName(macho: *const MachO, segname: []const u8, sectname: []const u8) ?std.macho.section_64 {
+    var it = macho.getLoadCommandsIterator();
+    while (it.next()) |lc| switch (lc.cmd()) {
+        .SEGMENT_64 => {
+            for (lc.getSections()) |sect| {
+                if (std.mem.eql(u8, sect.segName(), segname) and std.mem.eql(u8, sect.sectName(), sectname)) {
+                    return sect;
+                }
+            }
+        },
+        else => {},
+    };
+    return null;
+}
+
+pub fn getSectionData(macho: *const MachO, sect: std.macho.section_64) []const u8 {
+    const size = @intCast(usize, sect.size);
+    return macho.base.data[sect.offset..][0..size];
+}
+
 fn getLoadCommandsIterator(macho: *const MachO) std.macho.LoadCommandIterator {
     const data = @alignCast(@alignOf(u64), macho.base.data[@sizeOf(std.macho.mach_header_64)..])[0..macho.header.sizeofcmds];
     return .{
