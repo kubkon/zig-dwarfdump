@@ -867,30 +867,24 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype) !void {
         if (offset >= data.len) break;
 
         const header = try DwarfHeader.parse(data[offset..]);
-        offset += header.size();
+        var tmp_offset = header.size();
 
         const id = if (header.is64Bit())
-            mem.readIntLittle(u64, data[offset..][0..8])
+            mem.readIntLittle(u64, data[offset + tmp_offset ..][0..8])
         else
-            mem.readIntLittle(u32, data[offset..][0..4]);
-        offset += if (header.is64Bit()) 8 else 4;
+            mem.readIntLittle(u32, data[offset + tmp_offset ..][0..4]);
+        tmp_offset += if (header.is64Bit()) 8 else 4;
 
         if (id == 0) { // TODO hard-coding for now
             // CIE
-            const cie = try CommonInformationEntry.parse(header, id, data[offset..]);
-            const cie_end_offset = mem.alignForwardGeneric(u64, cie.header.length, addr_size) + cie.header.size();
-            const cie_offset = offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
-            offset += cie_end_offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
-
-            try cies.putNoClobber(cie_offset, cie);
+            const cie = try CommonInformationEntry.parse(header, id, data[offset + tmp_offset ..]);
+            try cies.putNoClobber(offset, cie);
+            offset += mem.alignForwardGeneric(u64, cie.header.length, addr_size) + cie.header.size();
         } else {
             // FDE
-            const fde = try FrameDescriptionEntry.parse(header, id, addr_size, data[offset..]);
-            const fde_end_offset = mem.alignForwardGeneric(u64, fde.header.length, addr_size) + fde.header.size();
-            const fde_offset = offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
-            offset += fde_end_offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
-
-            try fdes.append(.{ .fde = fde, .offset = fde_offset });
+            const fde = try FrameDescriptionEntry.parse(header, id, addr_size, data[offset + tmp_offset ..]);
+            try fdes.append(.{ .fde = fde, .offset = offset });
+            offset += mem.alignForwardGeneric(u64, fde.header.length, addr_size) + fde.header.size();
         }
     }
 
