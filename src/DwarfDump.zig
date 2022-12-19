@@ -440,8 +440,8 @@ const DwarfHeader = struct {
         return header.format == .@"64bit";
     }
 
-    fn lengthSize(header: DwarfHeader) usize {
-        return if (header.is64Bit()) 8 else 4;
+    fn size(header: DwarfHeader) usize {
+        return if (header.is64Bit()) 12 else 4;
     }
 };
 
@@ -843,6 +843,7 @@ pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
     }
 
     const macho = self.ctx.cast(Context.MachO).?;
+    const addr_size = 8;
     const sect = macho.getSectionByName("__TEXT", "__eh_frame") orelse {
         try writer.print("No __TEXT,__eh_frame section.\n", .{});
         return;
@@ -852,7 +853,10 @@ pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
 
     var cie: CommonInformationEntry = undefined;
     const nread = try CommonInformationEntry.parse(data, &cie);
-    _ = nread;
+    assert(nread == cie.header.length + cie.header.size());
+    // Eat out any padding
+    const fde_start = mem.alignForward(cie.header.length + cie.header.size(), addr_size);
+    _ = fde_start;
 
     try writer.writeAll("__TEXT,__eh_frame contents:\n");
     try writer.writeAll("\nCIE:\n");
@@ -944,7 +948,8 @@ const CommonInformationEntry = struct {
             augmentation_data = buffer[augmentation_start..][0..augmentation_length];
         }
 
-        const initial_instructions = buffer[creader.bytes_read..][0 .. header.length + header.lengthSize() - creader.bytes_read];
+        const initial_instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - creader.bytes_read];
+        creader.bytes_read += initial_instructions.len;
 
         cie.* = CommonInformationEntry{
             .header = header,
