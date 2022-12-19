@@ -78,16 +78,28 @@ pub fn parse(gpa: Allocator, data: []const u8) !*Elf {
     return elf;
 }
 
-pub fn getDebugInfoData(elf: *const Elf) []const u8 {
-    return elf.debug_info;
+pub fn getDebugInfoData(elf: *const Elf) ![]const u8 {
+    const shdr = elf.getShdrByName(".debug_info") orelse return error.MissingDebugInfo;
+    return elf.getShdrData(shdr);
 }
 
-pub fn getDebugStringData(elf: *const Elf) []const u8 {
-    return elf.debug_str;
+pub fn getDebugStringData(elf: *const Elf) ![]const u8 {
+    const shdr = elf.getShdrByName(".debug_str") orelse return error.MissingDebugInfo;
+    return elf.getShdrData(shdr);
 }
 
-pub fn getDebugAbbrevData(elf: *const Elf) []const u8 {
-    return elf.debug_abbrev;
+pub fn getDebugAbbrevData(elf: *const Elf) ![]const u8 {
+    const shdr = elf.getShdrByName(".debug_abbrev") orelse return error.MissingDebugInfo;
+    return elf.getShdrData(shdr);
+}
+
+pub fn getShdrByName(elf: *const Elf, name: []const u8) ?std.elf.Elf64_Shdr {
+    const shdrs = elf.getShdrs();
+    for (shdrs) |shdr| {
+        const shdr_name = elf.getShString(shdr.sh_name);
+        if (std.mem.eql(u8, shdr_name, name)) return shdr;
+    }
+    return null;
 }
 
 fn getShdrs(elf: *const Elf) []const std.elf.Elf64_Shdr {
@@ -98,14 +110,13 @@ fn getShdrs(elf: *const Elf) []const std.elf.Elf64_Shdr {
     return shdrs;
 }
 
-fn getShdrData(elf: *const Elf, index: u32) []const u8 {
-    const shdrs = elf.getShdrs();
-    const shdr = shdrs[index];
+fn getShdrData(elf: *const Elf, shdr: std.elf.Elf64_Shdr) []const u8 {
     return elf.base.data[shdr.sh_offset..][0..shdr.sh_size];
 }
 
 fn getShString(elf: *const Elf, off: u32) []const u8 {
-    const shstrtab = elf.getShdrData(elf.header.e_shstrndx);
+    const shdr = elf.getShdrs()[elf.header.e_shstrndx];
+    const shstrtab = elf.getShdrData(shdr);
     std.debug.assert(off < shstrtab.len);
     return std.mem.sliceTo(@ptrCast([*:0]const u8, shstrtab.ptr + off), 0);
 }
