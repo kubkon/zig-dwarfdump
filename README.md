@@ -11,15 +11,19 @@ will tell.
 ### Usage
 
 ```
-$ dwarfdump [--help] <FILE>
+$ zig-dwarfdump --help
+dwarfdump [--help] [--eh-frame] <FILE>
         --help
             Display this help and exit.
+
+        --eh-frame
+            Display .eh_frame section contents.
 ```
 
 ### Example usage (MachO)
 
 ```
-$ dwarfdump main.o
+$ zig-dwarfdump main.o
 
 __debug_info contents:
 0x0000000000000000: Compile Unit: length = 0x00000000000000a1, format = DWARF32, version = 0x0004, abbr_offset = 0x0000000000000000, addr_size = 0x08 (next unit at 0x00000000000000a5)
@@ -99,6 +103,41 @@ __debug_info contents:
                         DW_AT_type                            (4f)
 
 0x00000000000000a4:   NULL
+```
+
+```
+$ zig-dwarfdump --eh-frame main.o
+__TEXT,__eh_frame contents:
+
+CIE:
+  Length                        : 16
+  Id                            : 0
+  Version                       : 1
+  Augmentation                  : zR
+  Code Alignment Factor         : 1
+  Data Alignment Factor         : -8
+  Return Address Register       : 30
+  Augmentation Length           : 1
+  FDE Pointer Encoding          : 16
+  LSDA Pointer Encoding         : 0
+  Augmentation Data             : 0x10
+  Initial Instructions          : 0x0c1f00
+
+FDE:
+  Length                        : 32
+  CIE Pointer                   : 0x18
+  PC Begin                      : 0xffffffffffffffe4
+  PC Range                      : 64
+  Augmentation Length           : 0
+  Instructions                  : 0x440e10780e000000000000
+
+FDE:
+  Length                        : 44
+  CIE Pointer                   : 0x3c
+  PC Begin                      : 0xffffffffffffffc0
+  PC Range                      : 56
+  Augmentation Length           : 0
+  Instructions                  : 0x440e30480c1d109e019d02600c1f30480e00dedd000000
 ```
 
 ### Building
