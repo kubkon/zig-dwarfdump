@@ -841,7 +841,7 @@ fn getDwarfString(debug_str: []const u8, off: u64) []const u8 {
     return mem.sliceTo(@ptrCast([*:0]const u8, debug_str.ptr + off), 0);
 }
 
-pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
+pub fn printEhFrame(self: DwarfDump, writer: anytype) !void {
     switch (self.ctx.tag) {
         .elf => return error.Unimplemented,
         .macho => {},

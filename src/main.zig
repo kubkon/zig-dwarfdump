@@ -12,7 +12,7 @@ pub fn main() !void {
 
     const params = comptime [_]clap.Param(clap.Help){
         clap.parseParam("--help                 Display this help and exit.") catch unreachable,
-        clap.parseParam("--eh-header            Display eh_header section contents.") catch unreachable,
+        clap.parseParam("--eh-frame             Display .eh_frame section contents.") catch unreachable,
         clap.parseParam("<FILE>") catch unreachable,
     };
 
@@ -41,8 +41,8 @@ pub fn main() !void {
     var dd = try DwarfDump.parse(gpa.allocator(), file);
     defer dd.deinit();
 
-    if (res.args.@"eh-header") {
-        try dd.printEhHeader(stdout);
+    if (res.args.@"eh-frame") {
+        try dd.printEhFrame(stdout);
     } else try dd.printCompileUnits(stdout);
 }
 
