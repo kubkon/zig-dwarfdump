@@ -44,12 +44,16 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
         try lookup.ensureUnusedCapacity(std.math.maxInt(u8));
         try genAbbrevLookupByKind(self.ctx, cuh.debug_abbrev_offset, &lookup);
 
-        const next_unit_offset = cuh.length + @as(u64, if (cuh.is_64bit) @sizeOf(u64) else @sizeOf(u32));
+        const next_unit_offset = cuh.header.length + @as(u64, if (cuh.header.is64Bit())
+            @sizeOf(u64)
+        else
+            @sizeOf(u32));
+
         try writer.writeAll("__debug_info contents:\n");
         try writer.print("0x{x:0>16}: Compile Unit: length = 0x{x:0>16}, format = {s}, version = 0x{x:0>4}, abbr_offset = 0x{x:0>16}, addr_size = 0x{x:0>2} (next unit at 0x{x:0>16})\n", .{
             cu.off,
-            cuh.length,
-            if (cuh.is_64bit) "DWARF64" else "DWARF32",
+            cuh.header.length,
+            if (cuh.header.is64Bit()) "DWARF64" else "DWARF32",
             cuh.version,
             cuh.debug_abbrev_offset,
             cuh.address_size,
@@ -342,7 +346,10 @@ const CompileUnitIterator = struct {
         const reader = creader.reader();
 
         const cuh = try CompileUnit.Header.read(reader);
-        const total_length = cuh.length + @as(u64, if (cuh.is_64bit) @sizeOf(u64) else @sizeOf(u32));
+        const total_length = cuh.header.length + @as(u64, if (cuh.header.is64Bit())
+            @sizeOf(u64)
+        else
+            @sizeOf(u32));
 
         const cu = CompileUnit{
             .cuh = cuh,
@@ -390,30 +397,22 @@ const CompileUnit = struct {
     debug_info_off: usize,
 
     const Header = struct {
-        is_64bit: bool,
-        length: u64,
+        header: DwarfHeader,
         version: u16,
         debug_abbrev_offset: u64,
         address_size: u8,
 
         fn read(reader: anytype) !Header {
-            var length: u64 = try reader.readIntLittle(u32);
-
-            const is_64bit = length == 0xffffffff;
-            if (is_64bit) {
-                length = try reader.readIntLittle(u64);
-            }
-
+            const header = try parseDwarfHeader(reader);
             const version = try reader.readIntLittle(u16);
-            const debug_abbrev_offset = if (is_64bit)
+            const debug_abbrev_offset = if (header.is64Bit())
                 try reader.readIntLittle(u64)
             else
                 try reader.readIntLittle(u32);
             const address_size = try reader.readIntLittle(u8);
 
             return Header{
-                .is_64bit = is_64bit,
-                .length = length,
+                .header = header,
                 .version = version,
                 .debug_abbrev_offset = debug_abbrev_offset,
                 .address_size = address_size,
@@ -422,13 +421,37 @@ const CompileUnit = struct {
     };
 
     inline fn getDebugInfo(self: CompileUnit, ctx: *const Context) []const u8 {
-        return ctx.getDebugInfoData()[self.debug_info_off..][0..self.cuh.length];
+        return ctx.getDebugInfoData()[self.debug_info_off..][0..self.cuh.header.length];
     }
 
     fn getAbbrevEntryIterator(self: CompileUnit, ctx: *const Context) AbbrevEntryIterator {
         return .{ .ctx = ctx, .cu = self };
     }
 };
+
+const DwarfHeader = struct {
+    length: u64,
+    format: enum {
+        @"32bit",
+        @"64bit",
+    },
+
+    fn is64Bit(header: DwarfHeader) bool {
+        return header.format == .@"64bit";
+    }
+};
+
+fn parseDwarfHeader(reader: anytype) !DwarfHeader {
+    var length: u64 = try reader.readIntLittle(u32);
+    const is_64bit = length == 0xffffffff;
+    if (is_64bit) {
+        length = try reader.readIntLittle(u64);
+    }
+    return DwarfHeader{
+        .length = length,
+        .format = if (is_64bit) .@"64bit" else .@"32bit",
+    };
+}
 
 const AbbrevEntryIterator = struct {
     ctx: *const Context,
@@ -536,7 +559,7 @@ const Attribute = struct {
                 return mem.sliceTo(@ptrCast([*:0]const u8, debug_info.ptr), 0);
             },
             dwarf.FORM.strp => {
-                const off = if (cuh.is_64bit)
+                const off = if (cuh.header.is64Bit())
                     mem.readIntLittle(u64, debug_info[0..8])
                 else
                     mem.readIntLittle(u32, debug_info[0..4]);
@@ -549,7 +572,7 @@ const Attribute = struct {
     fn getSecOffset(self: Attribute, ctx: *const Context, cuh: CompileUnit.Header) ?u64 {
         if (self.form != dwarf.FORM.sec_offset) return null;
         const debug_info = self.getDebugInfo(ctx);
-        const value = if (cuh.is_64bit)
+        const value = if (cuh.header.is64Bit())
             mem.readIntLittle(u64, debug_info[0..8])
         else
             mem.readIntLittle(u32, debug_info[0..4]);
@@ -693,7 +716,7 @@ fn findFormSize(ctx: *const Context, form: u64, di_off: usize, cuh: CompileUnit.
         dwarf.FORM.strp,
         dwarf.FORM.sec_offset,
         dwarf.FORM.ref_addr,
-        => if (cuh.is_64bit) @sizeOf(u64) else @sizeOf(u32),
+        => if (cuh.header.is64Bit()) @sizeOf(u64) else @sizeOf(u32),
 
         dwarf.FORM.addr => cuh.address_size,
 
@@ -822,5 +845,13 @@ pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
     };
 
     const data = macho.getSectionData(sect);
+    var stream = std.io.fixedBufferStream(data);
+    var creader = std.io.countingReader(stream.reader());
+    const reader = creader.reader();
+
+    const header = try parseDwarfHeader(reader);
+
     log.warn("{x}", .{std.fmt.fmtSliceHexLower(data)});
+    log.warn("length = {x}", .{header.length});
+    log.warn("is_64bit = {}", .{header.is64Bit()});
 }
