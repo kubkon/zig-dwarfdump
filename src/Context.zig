@@ -23,6 +23,13 @@ pub fn cast(base: *Context, comptime T: type) ?*T {
     return @fieldParentPtr(T, "base", base);
 }
 
+pub fn constCast(base: *const Context, comptime T: type) ?*const T {
+    if (base.tag != T.base_tag)
+        return null;
+
+    return @fieldParentPtr(T, "base", base);
+}
+
 pub fn deinit(base: *Context, gpa: Allocator) void {
     gpa.free(base.data);
 }

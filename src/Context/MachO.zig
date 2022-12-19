@@ -112,6 +112,14 @@ pub fn getSectionData(macho: *const MachO, sect: std.macho.section_64) []const u
     return macho.base.data[sect.offset..][0..size];
 }
 
+pub fn isX86(macho: *const MachO) bool {
+    return macho.header.cputype == std.macho.CPU_TYPE_X86_64;
+}
+
+pub fn isARM(macho: *const MachO) bool {
+    return macho.header.cputype == std.macho.CPU_TYPE_ARM64;
+}
+
 fn getLoadCommandsIterator(macho: *const MachO) std.macho.LoadCommandIterator {
     const data = @alignCast(@alignOf(u64), macho.base.data[@sizeOf(std.macho.mach_header_64)..])[0..macho.header.sizeofcmds];
     return .{

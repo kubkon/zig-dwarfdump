@@ -439,6 +439,10 @@ const DwarfHeader = struct {
     fn is64Bit(header: DwarfHeader) bool {
         return header.format == .@"64bit";
     }
+
+    fn lengthSize(header: DwarfHeader) usize {
+        return if (header.is64Bit()) 8 else 4;
+    }
 };
 
 fn parseDwarfHeader(reader: anytype) !DwarfHeader {
@@ -840,18 +844,124 @@ pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
 
     const macho = self.ctx.cast(Context.MachO).?;
     const sect = macho.getSectionByName("__TEXT", "__eh_frame") orelse {
-        try writer.print("\nNo __TEXT,__eh_frame section.\n", .{});
+        try writer.print("No __TEXT,__eh_frame section.\n", .{});
         return;
     };
 
     const data = macho.getSectionData(sect);
-    var stream = std.io.fixedBufferStream(data);
-    var creader = std.io.countingReader(stream.reader());
-    const reader = creader.reader();
 
-    const header = try parseDwarfHeader(reader);
+    var cie: CommonInformationEntry = undefined;
+    const nread = try CommonInformationEntry.parse(data, &cie);
+    _ = nread;
 
-    log.warn("{x}", .{std.fmt.fmtSliceHexLower(data)});
-    log.warn("length = {x}", .{header.length});
-    log.warn("is_64bit = {}", .{header.is64Bit()});
+    try writer.writeAll("__TEXT,__eh_frame contents:\n");
+    try writer.writeAll("\nCIE:\n");
+    try writer.print("  {s: <30}: {d}\n", .{ "Length", cie.header.length });
+    try writer.print("  {s: <30}: {d}\n", .{ "Id", cie.id });
+    try writer.print("  {s: <30}: {d}\n", .{ "Version", cie.version });
+    try writer.print("  {s: <30}: {s}\n", .{ "Augmentation", cie.augmentation });
+    try writer.print("  {s: <30}: {d}\n", .{ "Code Alignment Factor", cie.code_alignment_factor });
+    try writer.print("  {s: <30}: {d}\n", .{ "Data Alignment Factor", cie.data_alignment_factor });
+    try writer.print("  {s: <30}: {d}\n", .{ "Return Address Register", cie.return_address_register });
+    try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", cie.augmentation_data.len });
+    try writer.print("  {s: <30}: {d}\n", .{ "FDE Pointer Encoding", cie.fde_pointer_encoding });
+    try writer.print("  {s: <30}: {d}\n", .{ "LSDA Pointer Encoding", cie.lsda_pointer_encoding });
+
+    if (cie.personality) |_| {
+        try writer.print("  {s: <30}: {d}\n", .{ "Personality", cie.personality.? });
+        try writer.print("  {s: <30}: {d}\n", .{ "Personality Encoding", cie.personality_encoding.? });
+    }
+
+    try writer.print("  {s: <30}: 0x{x}\n", .{ "Augmentation Data", std.fmt.fmtSliceHexLower(cie.augmentation_data) });
+    try writer.print("  {s: <30}: 0x{x}\n", .{
+        "Initial Instructions",
+        std.fmt.fmtSliceHexLower(cie.initial_instructions),
+    });
 }
+
+const CommonInformationEntry = struct {
+    header: DwarfHeader,
+    id: u64,
+    version: u8,
+    augmentation: []const u8,
+    code_alignment_factor: u64,
+    data_alignment_factor: i64,
+    return_address_register: u64,
+    augmentation_data: []const u8,
+    fde_pointer_encoding: u32,
+    lsda_pointer_encoding: u32,
+    personality: ?u64,
+    personality_encoding: ?u32,
+    initial_instructions: []const u8,
+
+    fn parse(buffer: []const u8, cie: *CommonInformationEntry) !usize {
+        var stream = std.io.fixedBufferStream(buffer);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+
+        const header = try parseDwarfHeader(reader);
+        const id = if (header.is64Bit()) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
+        const version = try reader.readByte();
+
+        const augmentation = blk: {
+            const augmentation = mem.sliceTo(@ptrCast([*:0]const u8, buffer.ptr + creader.bytes_read), 0);
+            stream.pos += augmentation.len + 1;
+            creader.bytes_read += augmentation.len + 1;
+            break :blk augmentation;
+        };
+
+        const code_alignment_factor = try leb.readULEB128(u64, reader);
+        const data_alignment_factor = try leb.readILEB128(i64, reader);
+        const return_address_register = try leb.readULEB128(u64, reader);
+
+        var augmentation_start: usize = 0;
+        var augmentation_length: usize = 0;
+        var augmentation_data: []const u8 = &[0]u8{};
+        var fde_pointer_encoding: u32 = 0;
+        var lsda_pointer_encoding: u32 = 0;
+        var personality: ?u64 = null;
+        var personality_encoding: ?u32 = null;
+
+        for (augmentation) |ch| switch (ch) {
+            'z' => {
+                augmentation_length = try leb.readULEB128(u64, reader);
+                augmentation_start = creader.bytes_read;
+            },
+            'R' => {
+                fde_pointer_encoding = try reader.readByte();
+            },
+            'P' => {
+                personality_encoding = try reader.readByte();
+                return error.TODOParsePersonalityPointer;
+            },
+            'L' => {
+                lsda_pointer_encoding = try reader.readByte();
+            },
+            else => return error.UnhandledAugmentationType,
+        };
+
+        if (augmentation_length > 0) {
+            augmentation_data = buffer[augmentation_start..][0..augmentation_length];
+        }
+
+        const initial_instructions = buffer[creader.bytes_read..][0 .. header.length + header.lengthSize() - creader.bytes_read];
+
+        cie.* = CommonInformationEntry{
+            .header = header,
+            .id = id,
+            .version = version,
+            .augmentation = augmentation,
+            .code_alignment_factor = code_alignment_factor,
+            .data_alignment_factor = data_alignment_factor,
+            .return_address_register = return_address_register,
+            .augmentation_data = augmentation_data,
+            .fde_pointer_encoding = fde_pointer_encoding,
+            .lsda_pointer_encoding = lsda_pointer_encoding,
+            .personality = personality,
+            .personality_encoding = personality_encoding,
+            .initial_instructions = initial_instructions,
+        };
+
+        return creader.bytes_read;
+    }
+};
