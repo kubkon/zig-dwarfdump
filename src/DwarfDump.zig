@@ -403,7 +403,7 @@ const CompileUnit = struct {
         address_size: u8,
 
         fn read(reader: anytype) !Header {
-            const header = try parseDwarfHeader(reader);
+            const header = try DwarfHeader.parseReader(reader);
             const version = try reader.readIntLittle(u16);
             const debug_abbrev_offset = if (header.is64Bit())
                 try reader.readIntLittle(u64)
@@ -443,19 +443,24 @@ const DwarfHeader = struct {
     fn size(header: DwarfHeader) usize {
         return if (header.is64Bit()) 12 else 4;
     }
-};
 
-fn parseDwarfHeader(reader: anytype) !DwarfHeader {
-    var length: u64 = try reader.readIntLittle(u32);
-    const is_64bit = length == 0xffffffff;
-    if (is_64bit) {
-        length = try reader.readIntLittle(u64);
+    fn parse(buffer: []const u8) !DwarfHeader {
+        var stream = std.io.fixedBufferStream(buffer);
+        return parseReader(stream.reader());
     }
-    return DwarfHeader{
-        .length = length,
-        .format = if (is_64bit) .@"64bit" else .@"32bit",
-    };
-}
+
+    fn parseReader(reader: anytype) !DwarfHeader {
+        var length: u64 = try reader.readIntLittle(u32);
+        const is_64bit = length == 0xffffffff;
+        if (is_64bit) {
+            length = try reader.readIntLittle(u64);
+        }
+        return DwarfHeader{
+            .length = length,
+            .format = if (is_64bit) .@"64bit" else .@"32bit",
+        };
+    }
+};
 
 const AbbrevEntryIterator = struct {
     ctx: *const Context,
@@ -849,38 +854,87 @@ pub fn printEhHeader(self: DwarfDump, writer: anytype) !void {
         return;
     };
 
+    var cies = std.AutoArrayHashMap(u64, CommonInformationEntry).init(self.gpa);
+    defer cies.deinit();
+
+    var fdes = std.ArrayList(struct { fde: FrameDescriptionEntry, offset: u64 }).init(self.gpa);
+    defer fdes.deinit();
+
     const data = macho.getSectionData(sect);
+    var offset: u64 = 0;
 
-    var cie: CommonInformationEntry = undefined;
-    const nread = try CommonInformationEntry.parse(data, &cie);
-    assert(nread == cie.header.length + cie.header.size());
-    // Eat out any padding
-    const fde_start = mem.alignForward(cie.header.length + cie.header.size(), addr_size);
-    _ = fde_start;
+    while (true) {
+        if (offset >= data.len) break;
 
-    try writer.writeAll("__TEXT,__eh_frame contents:\n");
-    try writer.writeAll("\nCIE:\n");
-    try writer.print("  {s: <30}: {d}\n", .{ "Length", cie.header.length });
-    try writer.print("  {s: <30}: {d}\n", .{ "Id", cie.id });
-    try writer.print("  {s: <30}: {d}\n", .{ "Version", cie.version });
-    try writer.print("  {s: <30}: {s}\n", .{ "Augmentation", cie.augmentation });
-    try writer.print("  {s: <30}: {d}\n", .{ "Code Alignment Factor", cie.code_alignment_factor });
-    try writer.print("  {s: <30}: {d}\n", .{ "Data Alignment Factor", cie.data_alignment_factor });
-    try writer.print("  {s: <30}: {d}\n", .{ "Return Address Register", cie.return_address_register });
-    try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", cie.augmentation_data.len });
-    try writer.print("  {s: <30}: {d}\n", .{ "FDE Pointer Encoding", cie.fde_pointer_encoding });
-    try writer.print("  {s: <30}: {d}\n", .{ "LSDA Pointer Encoding", cie.lsda_pointer_encoding });
+        const header = try DwarfHeader.parse(data[offset..]);
+        offset += header.size();
 
-    if (cie.personality) |_| {
-        try writer.print("  {s: <30}: {d}\n", .{ "Personality", cie.personality.? });
-        try writer.print("  {s: <30}: {d}\n", .{ "Personality Encoding", cie.personality_encoding.? });
+        const id = if (header.is64Bit())
+            mem.readIntLittle(u64, data[offset..][0..8])
+        else
+            mem.readIntLittle(u32, data[offset..][0..4]);
+        offset += if (header.is64Bit()) 8 else 4;
+
+        if (id == 0) { // TODO hard-coding for now
+            // CIE
+            const cie = try CommonInformationEntry.parse(header, id, data[offset..]);
+            const cie_end_offset = mem.alignForwardGeneric(u64, cie.header.length, addr_size) + cie.header.size();
+            const cie_offset = offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
+            offset += cie_end_offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
+
+            try cies.putNoClobber(cie_offset, cie);
+        } else {
+            // FDE
+            const fde = try FrameDescriptionEntry.parse(header, id, addr_size, data[offset..]);
+            const fde_end_offset = mem.alignForwardGeneric(u64, fde.header.length, addr_size) + fde.header.size();
+            const fde_offset = offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
+            offset += fde_end_offset - header.size() - (if (header.is64Bit()) @as(u64, 8) else 4);
+
+            try fdes.append(.{ .fde = fde, .offset = fde_offset });
+        }
     }
 
-    try writer.print("  {s: <30}: 0x{x}\n", .{ "Augmentation Data", std.fmt.fmtSliceHexLower(cie.augmentation_data) });
-    try writer.print("  {s: <30}: 0x{x}\n", .{
-        "Initial Instructions",
-        std.fmt.fmtSliceHexLower(cie.initial_instructions),
-    });
+    try writer.writeAll("__TEXT,__eh_frame contents:\n");
+
+    for (cies.keys()) |cie_offset| {
+        const cie = cies.get(cie_offset).?;
+
+        try writer.writeAll("\nCIE:\n");
+        try writer.print("  {s: <30}: {d}\n", .{ "Length", cie.header.length });
+        try writer.print("  {s: <30}: {d}\n", .{ "Id", cie.id });
+        try writer.print("  {s: <30}: {d}\n", .{ "Version", cie.version });
+        try writer.print("  {s: <30}: {s}\n", .{ "Augmentation", cie.augmentation });
+        try writer.print("  {s: <30}: {d}\n", .{ "Code Alignment Factor", cie.code_alignment_factor });
+        try writer.print("  {s: <30}: {d}\n", .{ "Data Alignment Factor", cie.data_alignment_factor });
+        try writer.print("  {s: <30}: {d}\n", .{ "Return Address Register", cie.return_address_register });
+        try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", cie.augmentation_data.len });
+        try writer.print("  {s: <30}: {d}\n", .{ "FDE Pointer Encoding", cie.fde_pointer_encoding });
+        try writer.print("  {s: <30}: {d}\n", .{ "LSDA Pointer Encoding", cie.lsda_pointer_encoding });
+
+        if (cie.personality) |_| {
+            try writer.print("  {s: <30}: {d}\n", .{ "Personality", cie.personality.? });
+            try writer.print("  {s: <30}: {d}\n", .{ "Personality Encoding", cie.personality_encoding.? });
+        }
+
+        try writer.print("  {s: <30}: 0x{x}\n", .{ "Augmentation Data", std.fmt.fmtSliceHexLower(cie.augmentation_data) });
+        try writer.print("  {s: <30}: 0x{x}\n", .{
+            "Initial Instructions",
+            std.fmt.fmtSliceHexLower(cie.initial_instructions),
+        });
+
+        for (fdes.items) |fde_with_offset| {
+            const fde = fde_with_offset.fde;
+            if (fde_with_offset.offset + fde.header.size() - fde.cie_pointer != cie_offset) continue;
+
+            try writer.writeAll("\nFDE:\n");
+            try writer.print("  {s: <30}: {d}\n", .{ "Length", fde.header.length });
+            try writer.print("  {s: <30}: 0x{x}\n", .{ "CIE Pointer", fde.cie_pointer });
+            try writer.print("  {s: <30}: 0x{x}\n", .{ "PC Begin", fde.pc_begin });
+            try writer.print("  {s: <30}: {d}\n", .{ "PC Range", fde.pc_range });
+            try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", fde.augmentation_data.len });
+            try writer.print("  {s: <30}: 0x{x}\n", .{ "Instructions", std.fmt.fmtSliceHexLower(fde.instructions) });
+        }
+    }
 }
 
 const CommonInformationEntry = struct {
@@ -898,15 +952,12 @@ const CommonInformationEntry = struct {
     personality_encoding: ?u32,
     initial_instructions: []const u8,
 
-    fn parse(buffer: []const u8, cie: *CommonInformationEntry) !usize {
+    fn parse(header: DwarfHeader, id: u64, buffer: []const u8) !CommonInformationEntry {
         var stream = std.io.fixedBufferStream(buffer);
         var creader = std.io.countingReader(stream.reader());
         const reader = creader.reader();
 
-        const header = try parseDwarfHeader(reader);
-        const id = if (header.is64Bit()) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
         const version = try reader.readByte();
-
         const augmentation = blk: {
             const augmentation = mem.sliceTo(@ptrCast([*:0]const u8, buffer.ptr + creader.bytes_read), 0);
             stream.pos += augmentation.len + 1;
@@ -948,10 +999,10 @@ const CommonInformationEntry = struct {
             augmentation_data = buffer[augmentation_start..][0..augmentation_length];
         }
 
-        const initial_instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - creader.bytes_read];
-        creader.bytes_read += initial_instructions.len;
+        const nread = creader.bytes_read + header.size() + (if (header.is64Bit()) @as(u64, 8) else 4);
+        const initial_instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - nread];
 
-        cie.* = CommonInformationEntry{
+        return CommonInformationEntry{
             .header = header,
             .id = id,
             .version = version,
@@ -966,7 +1017,40 @@ const CommonInformationEntry = struct {
             .personality_encoding = personality_encoding,
             .initial_instructions = initial_instructions,
         };
+    }
+};
 
-        return creader.bytes_read;
+const FrameDescriptionEntry = struct {
+    header: DwarfHeader,
+    cie_pointer: u64,
+    pc_begin: u64,
+    pc_range: u64,
+    augmentation_data: []const u8,
+    instructions: []const u8,
+
+    fn parse(header: DwarfHeader, cie_pointer: u64, addr_size: u16, buffer: []const u8) !FrameDescriptionEntry {
+        var stream = std.io.fixedBufferStream(buffer);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+
+        const pc_begin = if (addr_size == 8) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
+        const pc_range = if (addr_size == 8) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
+
+        const augmentation_length = try leb.readULEB128(u64, reader);
+        const augmentation_data = buffer[creader.bytes_read..][0..augmentation_length];
+        creader.bytes_read += augmentation_length;
+        stream.pos += augmentation_length;
+
+        const nread = creader.bytes_read + header.size() + (if (header.is64Bit()) @as(u64, 8) else 4);
+        const instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - nread];
+
+        return FrameDescriptionEntry{
+            .header = header,
+            .cie_pointer = cie_pointer,
+            .pc_begin = pc_begin,
+            .pc_range = pc_range,
+            .augmentation_data = augmentation_data,
+            .instructions = instructions,
+        };
     }
 };
