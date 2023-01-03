@@ -859,7 +859,7 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype) !void {
     }
 
     const macho = self.ctx.cast(Context.MachO).?;
-    const addr_size = 8;
+    const addr_size: u8 = 8;
     const sect = macho.getSectionByName("__TEXT", "__eh_frame") orelse {
         try writer.print("No __TEXT,__eh_frame section.\n", .{});
         return;
@@ -890,12 +890,12 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype) !void {
             // CIE
             const cie = try CommonInformationEntry.parse(header, id, addr_size, data[offset + tmp_offset ..]);
             try cies.putNoClobber(offset, cie);
-            offset += mem.alignForwardGeneric(u64, cie.header.length, addr_size) + cie.header.size();
+            offset += cie.header.length + cie.header.size();
         } else {
             // FDE
             const fde = try FrameDescriptionEntry.parse(header, id, addr_size, data[offset + tmp_offset ..]);
             try fdes.append(.{ .fde = fde, .offset = offset });
-            offset += mem.alignForwardGeneric(u64, fde.header.length, addr_size) + fde.header.size();
+            offset += fde.header.length + fde.header.size();
         }
     }
 
@@ -908,17 +908,17 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype) !void {
         try writer.print("  {s: <30}: {d}\n", .{ "Length", cie.header.length });
         try writer.print("  {s: <30}: {d}\n", .{ "Id", cie.id });
         try writer.print("  {s: <30}: {d}\n", .{ "Version", cie.version });
-        try writer.print("  {s: <30}: {s}\n", .{ "Augmentation", cie.augmentation });
+        try writer.print("  {s: <30}: {s}\n", .{ "Augmentation", cie.augmentation_str });
         try writer.print("  {s: <30}: {d}\n", .{ "Code Alignment Factor", cie.code_alignment_factor });
         try writer.print("  {s: <30}: {d}\n", .{ "Data Alignment Factor", cie.data_alignment_factor });
         try writer.print("  {s: <30}: {d}\n", .{ "Return Address Register", cie.return_address_register });
         try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", cie.augmentation_data.len });
-        try writer.print("  {s: <30}: {d}\n", .{ "FDE Pointer Encoding", cie.fde_pointer_encoding });
-        try writer.print("  {s: <30}: {d}\n", .{ "LSDA Pointer Encoding", cie.lsda_pointer_encoding });
+        try writer.print("  {s: <30}: 0x{x}\n", .{ "FDE Pointer Encoding", cie.fde_pointer_encoding });
+        try writer.print("  {s: <30}: 0x{x}\n", .{ "LSDA Pointer Encoding", cie.lsda_pointer_encoding });
 
         if (cie.personality) |_| {
-            try writer.print("  {s: <30}: {d}\n", .{ "Personality", cie.personality.? });
-            try writer.print("  {s: <30}: {d}\n", .{ "Personality Encoding", cie.personality_encoding.? });
+            try writer.print("  {s: <30}: 0x{x}\n", .{ "Personality", cie.personality.? });
+            try writer.print("  {s: <30}: 0x{x}\n", .{ "Personality Encoding", cie.personality_encoding.? });
         }
 
         try writer.print("  {s: <30}: 0x{x}\n", .{ "Augmentation Data", std.fmt.fmtSliceHexLower(cie.augmentation_data) });
@@ -946,7 +946,7 @@ const CommonInformationEntry = struct {
     header: DwarfHeader,
     id: u64,
     version: u8,
-    augmentation: []const u8,
+    augmentation_str: []const u8,
     code_alignment_factor: u64,
     data_alignment_factor: i64,
     return_address_register: u64,
@@ -954,17 +954,16 @@ const CommonInformationEntry = struct {
     fde_pointer_encoding: u32,
     lsda_pointer_encoding: u32,
     personality: ?u64,
-    personality_encoding: ?u32,
+    personality_encoding: ?u8,
     initial_instructions: []const u8,
 
-    fn parse(header: DwarfHeader, id: u64, addr_size: u16, buffer: []const u8) !CommonInformationEntry {
-        _ = addr_size;
+    fn parse(header: DwarfHeader, id: u64, addr_size: u8, buffer: []const u8) !CommonInformationEntry {
         var stream = std.io.fixedBufferStream(buffer);
         var creader = std.io.countingReader(stream.reader());
         const reader = creader.reader();
 
         const version = try reader.readByte();
-        const augmentation = blk: {
+        const augmentation_str = blk: {
             const augmentation = mem.sliceTo(@ptrCast([*:0]const u8, buffer.ptr + creader.bytes_read), 0);
             stream.pos += augmentation.len + 1;
             creader.bytes_read += augmentation.len + 1;
@@ -981,10 +980,12 @@ const CommonInformationEntry = struct {
         var fde_pointer_encoding: u32 = 0;
         var lsda_pointer_encoding: u32 = 0;
         var personality: ?u64 = null;
-        var personality_encoding: ?u32 = null;
+        var personality_encoding: ?u8 = null;
 
-        for (augmentation) |ch| switch (ch) {
-            'z' => {
+        for (augmentation_str) |ch, i| switch (ch) {
+            'z' => if (i > 0) {
+                return error.MalformedAugmentationString;
+            } else {
                 augmentation_length = try leb.readULEB128(u64, reader);
                 augmentation_start = creader.bytes_read;
             },
@@ -993,12 +994,13 @@ const CommonInformationEntry = struct {
             },
             'P' => {
                 personality_encoding = try reader.readByte();
-                return error.TODOParsePersonalityPointer;
+                personality = try getEncodedPointer(personality_encoding.?, addr_size, 0, reader); // TODO resolve relocs
             },
             'L' => {
                 lsda_pointer_encoding = try reader.readByte();
             },
-            else => return error.UnhandledAugmentationType,
+            'S', 'B', 'G' => {},
+            else => return error.UnknownAugmentationStringValue,
         };
 
         if (augmentation_length > 0) {
@@ -1012,7 +1014,7 @@ const CommonInformationEntry = struct {
             .header = header,
             .id = id,
             .version = version,
-            .augmentation = augmentation,
+            .augmentation_str = augmentation_str,
             .code_alignment_factor = code_alignment_factor,
             .data_alignment_factor = data_alignment_factor,
             .return_address_register = return_address_register,
@@ -1060,3 +1062,57 @@ const FrameDescriptionEntry = struct {
         };
     }
 };
+
+const EH_PE = struct {
+    const absptr = 0x00;
+    const uleb128 = 0x01;
+    const udata2 = 0x02;
+    const udata4 = 0x03;
+    const udata8 = 0x04;
+    const sleb128 = 0x09;
+    const sdata2 = 0x0A;
+    const sdata4 = 0x0B;
+    const sdata8 = 0x0C;
+    const pcrel = 0x10;
+    const textrel = 0x20;
+    const datarel = 0x30;
+    const funcrel = 0x40;
+    const aligned = 0x50;
+    const indirect = 0x80;
+    const omit = 0xFF;
+};
+
+fn getEncodedPointer(enc: u8, addr_size: u8, pcrel_offset: i64, reader: anytype) !?u64 {
+    if (enc == EH_PE.omit) return null;
+
+    var ptr: i64 = switch (enc & 0x0F) {
+        EH_PE.absptr => switch (addr_size) {
+            2 => @bitCast(i16, try reader.readIntLittle(u16)),
+            4 => @bitCast(i32, try reader.readIntLittle(u32)),
+            8 => @bitCast(i64, try reader.readIntLittle(u64)),
+            else => return null,
+        },
+        EH_PE.udata2 => @bitCast(i16, try reader.readIntLittle(u16)),
+        EH_PE.udata4 => @bitCast(i32, try reader.readIntLittle(u32)),
+        EH_PE.udata8 => @bitCast(i64, try reader.readIntLittle(u64)),
+        EH_PE.uleb128 => @bitCast(i64, try leb.readULEB128(u64, reader)),
+        EH_PE.sdata2 => try reader.readIntLittle(i16),
+        EH_PE.sdata4 => try reader.readIntLittle(i32),
+        EH_PE.sdata8 => try reader.readIntLittle(i64),
+        EH_PE.sleb128 => try leb.readILEB128(i64, reader),
+        else => return null,
+    };
+
+    switch (enc & 0x70) {
+        EH_PE.absptr => {},
+        EH_PE.pcrel => ptr += pcrel_offset,
+        EH_PE.datarel,
+        EH_PE.textrel,
+        EH_PE.funcrel,
+        EH_PE.aligned,
+        => return null,
+        else => return null,
+    }
+
+    return @bitCast(u64, ptr);
+}
