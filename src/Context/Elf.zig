@@ -10,10 +10,9 @@ pub const base_tag: Context.Tag = .elf;
 base: Context,
 
 header: std.elf.Elf64_Ehdr,
-
-debug_info: []const u8,
-debug_abbrev: []const u8,
-debug_str: []const u8,
+debug_info_sect: ?std.elf.Elf64_Shdr = null,
+debug_string_sect: ?std.elf.Elf64_Shdr = null,
+debug_abbrev_sect: ?std.elf.Elf64_Shdr = null,
 
 pub fn isElfFile(data: []const u8) bool {
     // TODO: 32bit ELF files
@@ -36,60 +35,41 @@ pub fn parse(gpa: Allocator, data: []const u8) !*Elf {
             .data = data,
         },
         .header = undefined,
-        .debug_info = undefined,
-        .debug_abbrev = undefined,
-        .debug_str = undefined,
     };
     elf.header = @ptrCast(*const std.elf.Elf64_Ehdr, @alignCast(@alignOf(std.elf.Elf64_Ehdr), data.ptr)).*;
 
     const shdrs = elf.getShdrs();
-
-    var debug_info_h: ?std.elf.Elf64_Shdr = null;
-    var debug_abbrev_h: ?std.elf.Elf64_Shdr = null;
-    var debug_str_h: ?std.elf.Elf64_Shdr = null;
-
-    for (shdrs) |shdr, i| switch (shdr.sh_type) {
+    for (shdrs, 0..) |shdr, i| switch (shdr.sh_type) {
         std.elf.SHT_PROGBITS => {
             const sh_name = elf.getShString(@intCast(u32, i));
             if (std.mem.eql(u8, sh_name, ".debug_info")) {
-                debug_info_h = shdr;
+                elf.debug_info_sect = shdr;
             }
             if (std.mem.eql(u8, sh_name, ".debug_abbrev")) {
-                debug_abbrev_h = shdr;
+                elf.debug_abbrev_sect = shdr;
             }
             if (std.mem.eql(u8, sh_name, ".debug_str")) {
-                debug_str_h = shdr;
+                elf.debug_string_sect = shdr;
             }
         },
         else => {},
     };
 
-    if (debug_info_h == null or debug_abbrev_h == null or debug_str_h == null) {
-        return error.MissingDebugInfo;
-    }
-
-    const dih = debug_info_h.?;
-    const dah = debug_abbrev_h.?;
-    const dsh = debug_str_h.?;
-    elf.debug_info = data[dih.sh_offset..][0..dih.sh_size];
-    elf.debug_abbrev = data[dah.sh_offset..][0..dah.sh_size];
-    elf.debug_str = data[dsh.sh_offset..][0..dsh.sh_size];
-
     return elf;
 }
 
-pub fn getDebugInfoData(elf: *const Elf) ![]const u8 {
-    const shdr = elf.getShdrByName(".debug_info") orelse return error.MissingDebugInfo;
+pub fn getDebugInfoData(elf: *const Elf) ?[]const u8 {
+    const shdr = elf.debug_info_sect orelse return null;
     return elf.getShdrData(shdr);
 }
 
-pub fn getDebugStringData(elf: *const Elf) ![]const u8 {
-    const shdr = elf.getShdrByName(".debug_str") orelse return error.MissingDebugInfo;
+pub fn getDebugStringData(elf: *const Elf) ?[]const u8 {
+    const shdr = elf.debug_string_sect orelse return null;
     return elf.getShdrData(shdr);
 }
 
-pub fn getDebugAbbrevData(elf: *const Elf) ![]const u8 {
-    const shdr = elf.getShdrByName(".debug_abbrev") orelse return error.MissingDebugInfo;
+pub fn getDebugAbbrevData(elf: *const Elf) ?[]const u8 {
+    const shdr = elf.debug_abbrev_sect orelse return null;
     return elf.getShdrData(shdr);
 }
 

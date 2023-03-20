@@ -10,6 +10,9 @@ pub const base_tag: Context.Tag = .macho;
 base: Context,
 
 header: std.macho.mach_header_64,
+debug_info_sect: ?std.macho.section_64 = null,
+debug_abbrev_sect: ?std.macho.section_64 = null,
+debug_string_sect: ?std.macho.section_64 = null,
 
 pub fn isMachOFile(data: []const u8) bool {
     const header = @ptrCast(*const std.macho.mach_header_64, @alignCast(@alignOf(std.macho.mach_header_64), data.ptr)).*;
@@ -35,21 +38,41 @@ pub fn parse(gpa: Allocator, data: []const u8) !*MachO {
 
     macho.header = @ptrCast(*const std.macho.mach_header_64, @alignCast(@alignOf(std.macho.mach_header_64), data.ptr)).*;
 
+    var it = macho.getLoadCommandsIterator();
+    while (it.next()) |lc| switch (lc.cmd()) {
+        .SEGMENT_64 => {
+            for (lc.getSections()) |sect| {
+                if (std.mem.eql(u8, sect.segName(), "__DWARF")) {
+                    if (std.mem.eql(u8, sect.sectName(), "__debug_info")) {
+                        macho.debug_info_sect = sect;
+                    }
+                    if (std.mem.eql(u8, sect.sectName(), "__debug_abbrev")) {
+                        macho.debug_abbrev_sect = sect;
+                    }
+                    if (std.mem.eql(u8, sect.sectName(), "__debug_str")) {
+                        macho.debug_string_sect = sect;
+                    }
+                }
+            }
+        },
+        else => {},
+    };
+
     return macho;
 }
 
-pub fn getDebugInfoData(macho: *const MachO) ![]const u8 {
-    const sect = macho.getSectionByName("__DWARF", "__debug_info") orelse return error.MissingDebugInfo;
+pub fn getDebugInfoData(macho: *const MachO) ?[]const u8 {
+    const sect = macho.debug_info_sect orelse return null;
     return macho.getSectionData(sect);
 }
 
-pub fn getDebugStringData(macho: *const MachO) ![]const u8 {
-    const sect = macho.getSectionByName("__DWARF", "__debug_str") orelse return error.MissingDebugInfo;
+pub fn getDebugStringData(macho: *const MachO) ?[]const u8 {
+    const sect = macho.debug_string_sect orelse return null;
     return macho.getSectionData(sect);
 }
 
-pub fn getDebugAbbrevData(macho: *const MachO) ![]const u8 {
-    const sect = macho.getSectionByName("__DWARF", "__debug_abbrev") orelse return error.MissingDebugInfo;
+pub fn getDebugAbbrevData(macho: *const MachO) ?[]const u8 {
+    const sect = macho.debug_abbrev_sect orelse return null;
     return macho.getSectionData(sect);
 }
 

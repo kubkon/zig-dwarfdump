@@ -60,21 +60,21 @@ pub fn parse(gpa: Allocator, data: []const u8) !*Context {
     return error.UnknownFileFormat;
 }
 
-pub fn getDebugInfoData(base: *const Context) ![]const u8 {
+pub fn getDebugInfoData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugInfoData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugInfoData(),
     };
 }
 
-pub fn getDebugStringData(base: *const Context) ![]const u8 {
+pub fn getDebugStringData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugStringData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugStringData(),
     };
 }
 
-pub fn getDebugAbbrevData(base: *const Context) ![]const u8 {
+pub fn getDebugAbbrevData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugAbbrevData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugAbbrevData(),
