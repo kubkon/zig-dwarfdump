@@ -13,6 +13,7 @@ pub fn main() !void {
     const params = comptime [_]clap.Param(clap.Help){
         clap.parseParam("--help                 Display this help and exit.") catch unreachable,
         clap.parseParam("--eh-frame             Display .eh_frame section contents.") catch unreachable,
+        clap.parseParam("--llvm-compatibility   Output is formatted exactly like llvm-dwarfdump, with no extra information.") catch unreachable,
         clap.parseParam("<FILE>") catch unreachable,
     };
 
@@ -42,7 +43,12 @@ pub fn main() !void {
     defer dd.deinit();
 
     if (res.args.@"eh-frame") {
-        try dd.printEhFrame(stdout);
+        try stdout.print("{s}:\tfile format {s}-{s}\n\n", .{ filename, switch (dd.ctx.tag) {
+            .elf => "elf64",
+            .macho => "MachO",
+        }, if (dd.ctx.getArch()) |arch| @tagName(arch) else "unknown" });
+
+        try dd.printEhFrames(stdout, res.args.@"llvm-compatibility");
     } else try dd.printCompileUnits(stdout);
 }
 

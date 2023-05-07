@@ -80,3 +80,10 @@ pub fn getDebugAbbrevData(base: *const Context) ?[]const u8 {
         .macho => @fieldParentPtr(MachO, "base", base).getDebugAbbrevData(),
     };
 }
+
+pub fn getArch(base: *const Context) ?std.Target.Cpu.Arch {
+    return switch (base.tag) {
+        .elf => @fieldParentPtr(Elf, "base", base).getArch(),
+        .macho => @fieldParentPtr(MachO, "base", base).getArch(),
+    };
+}

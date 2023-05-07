@@ -111,3 +111,8 @@ fn getLoadCommandsIterator(macho: *const MachO) std.macho.LoadCommandIterator {
         .buffer = data,
     };
 }
+
+pub fn getArch(macho: *const MachO) ?std.Target.Cpu.Arch {
+    _ = macho;
+    return null;
+}
