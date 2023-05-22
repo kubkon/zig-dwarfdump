@@ -869,6 +869,7 @@ const CieWithHeader = struct {
 const WriteOptions = struct {
     llvm_compatibility: bool,
     frame_type: FrameType,
+    reg_ctx: abi.RegisterContext,
     addr_size: u8,
     endian: std.builtin.Endian,
 };
@@ -907,11 +908,16 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                 try writer.print("{s} contents:\n\n", .{section.name});
                 if (section.section) |s| {
                     if (s.sh_type != std.elf.SHT_NULL and s.sh_type != std.elf.SHT_NOBITS) {
-                        try self.printEhFrame(writer, llvm_compatibility, .{
-                            .data = section.data.?,
-                            .offset = s.sh_offset,
-                            .frame_type = section.frame_type,
-                        });
+                        try self.printEhFrame(
+                            writer,
+                            llvm_compatibility,
+                            .{
+                                .data = section.data.?,
+                                .offset = s.sh_offset,
+                                .frame_type = section.frame_type,
+                            },
+                            false,
+                        );
                     }
                 }
 
@@ -931,11 +937,16 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
             for (sections) |section| {
                 try writer.print("{s} contents:\n\n", .{section.name});
                 if (macho.getSectionByName("__TEXT", section.name)) |s| {
-                    try self.printEhFrame(writer, llvm_compatibility, .{
-                        .data = macho.getSectionData(s),
-                        .offset = s.offset,
-                        .frame_type = section.frame_type,
-                    });
+                    try self.printEhFrame(
+                        writer,
+                        llvm_compatibility,
+                        .{
+                            .data = macho.getSectionData(s),
+                            .offset = s.offset,
+                            .frame_type = section.frame_type,
+                        },
+                        true,
+                    );
                 }
 
                 try writer.writeAll("\n");
@@ -944,10 +955,15 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
     }
 }
 
-pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, section: Section) !void {
+pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, section: Section, is_macho: bool) !void {
     const write_options = WriteOptions{
         .llvm_compatibility = llvm_compatibility,
         .frame_type = section.frame_type,
+
+        .reg_ctx = .{
+            .eh_frame = section.frame_type == .eh,
+            .is_macho = is_macho,
+        },
 
         // TODO: Use the addr size / endianness of the file, provide in section
         .addr_size = @sizeOf(usize),
@@ -1072,7 +1088,7 @@ fn writeCie(
             const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
             const opcode = std.meta.activeTag(instruction);
             try writer.print("  DW_CFA_{s}:", .{@tagName(opcode)});
-            try writeOperands(instruction, writer, cie.*, self.ctx.getArch(), options.addr_size, options.endian);
+            try writeOperands(instruction, writer, cie.*, self.ctx.getArch(), options.reg_ctx, options.addr_size, options.endian);
             _ = try cie_with_header.vm.step(self.gpa, cie.*, true, instruction);
             try writer.writeByte('\n');
         }
@@ -1080,7 +1096,7 @@ fn writeCie(
 
     try writer.writeAll("\n");
     if (cie_with_header.vm.current_row.cfa.rule != .default) try writer.writeAll("  ");
-    try self.writeRow(writer, cie_with_header.vm, cie_with_header.vm.current_row, options.addr_size, options.endian);
+    try self.writeRow(writer, cie_with_header.vm, cie_with_header.vm.current_row, options.reg_ctx, options.addr_size, options.endian);
     try writer.writeByte('\n');
 
     cie_with_header.vm_snapshot_columns = cie_with_header.vm.columns.items.len;
@@ -1127,7 +1143,7 @@ fn writeFde(
         const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
         const opcode = std.meta.activeTag(instruction);
         try writer.print("  DW_CFA_{s}:", .{@tagName(opcode)});
-        try writeOperands(instruction, writer, cie.*, self.ctx.getArch(), options.addr_size, options.endian);
+        try writeOperands(instruction, writer, cie.*, self.ctx.getArch(), options.reg_ctx, options.addr_size, options.endian);
         try writer.writeByte('\n');
     }
 
@@ -1140,12 +1156,12 @@ fn writeFde(
         var prev_row = try cie_with_header.vm.step(self.gpa, cie.*, false, instruction);
         if (cie_with_header.vm.current_row.offset != prev_row.offset) {
             try writer.print("  0x{x}: ", .{fde.pc_begin + prev_row.offset});
-            try self.writeRow(writer, cie_with_header.vm, prev_row, options.addr_size, options.endian);
+            try self.writeRow(writer, cie_with_header.vm, prev_row, options.reg_ctx, options.addr_size, options.endian);
         }
     }
 
     try writer.print("  0x{x}: ", .{fde.pc_begin + cie_with_header.vm.current_row.offset});
-    try self.writeRow(writer, cie_with_header.vm, cie_with_header.vm.current_row, options.addr_size, options.endian);
+    try self.writeRow(writer, cie_with_header.vm, cie_with_header.vm.current_row, options.reg_ctx, options.addr_size, options.endian);
 
     // Restore the VM state to the result of the initial CIE instructions
     cie_with_header.vm.columns.items.len = cie_with_header.vm_snapshot_columns;
@@ -1155,9 +1171,17 @@ fn writeFde(
     try writer.writeByte('\n');
 }
 
-fn writeRow(self: DwarfDump, writer: anytype, vm: VirtualMachine, row: VirtualMachine.Row, addr_size: u8, endian: std.builtin.Endian) !void {
+fn writeRow(
+    self: DwarfDump,
+    writer: anytype,
+    vm: VirtualMachine,
+    row: VirtualMachine.Row,
+    reg_ctx: abi.RegisterContext,
+    addr_size: u8,
+    endian: std.builtin.Endian,
+) !void {
     var wrote_anything = false;
-    if (try writeColumnRule(row.cfa, writer, true, self.ctx.getArch(), addr_size, endian)) {
+    if (try writeColumnRule(row.cfa, writer, true, self.ctx.getArch(), reg_ctx, addr_size, endian)) {
         try writer.writeAll(": ");
         wrote_anything = true;
     }
@@ -1168,7 +1192,7 @@ fn writeRow(self: DwarfDump, writer: anytype, vm: VirtualMachine, row: VirtualMa
     for (0..256) |register| {
         for (columns) |column| {
             if (column.register == @intCast(u8, register)) {
-                if (try writeColumnRule(column, writer, false, self.ctx.getArch(), addr_size, endian)) {
+                if (try writeColumnRule(column, writer, false, self.ctx.getArch(), reg_ctx, addr_size, endian)) {
                     if (num_printed != columns.len - 1) {
                         try writer.writeAll(", ");
                     }
@@ -1190,6 +1214,7 @@ pub fn writeColumnRule(
     writer: anytype,
     is_cfa: bool,
     arch: ?std.Target.Cpu.Arch,
+    reg_ctx: abi.RegisterContext,
     addr_size_bytes: u8,
     endian: std.builtin.Endian,
 ) !bool {
@@ -1198,7 +1223,7 @@ pub fn writeColumnRule(
     if (is_cfa) {
         try writer.writeAll("CFA");
     } else {
-        try abi.writeRegisterName(writer, arch, column.register.?);
+        try writeRegisterName(writer, arch, column.register.?, reg_ctx);
     }
 
     try writer.writeByte('=');
@@ -1210,7 +1235,7 @@ pub fn writeColumnRule(
             if (offset == 0) {
                 if (is_cfa) {
                     if (column.register) |cfa_register| {
-                        try writer.print("{}", .{abi.fmtRegister(cfa_register, arch)});
+                        try writer.print("{}", .{fmtRegister(cfa_register, reg_ctx, arch)});
                     } else {
                         try writer.writeAll("undefined");
                     }
@@ -1220,7 +1245,7 @@ pub fn writeColumnRule(
             } else {
                 if (is_cfa) {
                     if (column.register) |cfa_register| {
-                        try writer.print("{}{d:<1}", .{ abi.fmtRegister(cfa_register, arch), offset });
+                        try writer.print("{}{d:<1}", .{ fmtRegister(cfa_register, reg_ctx, arch), offset });
                     } else {
                         try writer.print("undefined{d:<1}", .{offset});
                     }
@@ -1229,10 +1254,10 @@ pub fn writeColumnRule(
                 }
             }
         },
-        .register => |register| try abi.writeRegisterName(writer, arch, register),
+        .register => |register| try writeRegisterName(writer, arch, register, reg_ctx),
         .expression => |expression| {
             if (!is_cfa) try writer.writeByte('[');
-            try writeExpression(writer, expression, arch, addr_size_bytes, endian);
+            try writeExpression(writer, expression, arch, reg_ctx, addr_size_bytes, endian);
             if (!is_cfa) try writer.writeByte(']');
         },
         .val_expression => try writer.writeAll("TODO(val_expression)"),
@@ -1246,6 +1271,7 @@ fn writeExpression(
     writer: anytype,
     block: []const u8,
     arch: ?std.Target.Cpu.Arch,
+    reg_ctx: abi.RegisterContext,
     addr_size_bytes: u8,
     endian: std.builtin.Endian,
 ) !void {
@@ -1291,8 +1317,8 @@ fn writeExpression(
                         if (try StackMachine.readOperand(&stream, opcode)) |value| {
                             switch (value) {
                                 .generic => {}, // Constant values are implied by the opcode name
-                                .register => |v| try writer.print(" {}", .{abi.fmtRegister(v, arch)}),
-                                .base_register => |v| try writer.print(" {}{d:<1}", .{ abi.fmtRegister(v.base_register, arch), v.offset }),
+                                .register => |v| try writer.print(" {}", .{fmtRegister(v, reg_ctx, arch)}),
+                                .base_register => |v| try writer.print(" {}{d:<1}", .{ fmtRegister(v.base_register, reg_ctx, arch), v.offset }),
                                 else => try writer.print(" TODO({s})", .{@tagName(value)}),
                             }
                         }
@@ -1309,6 +1335,7 @@ fn writeOperands(
     writer: anytype,
     cie: dwarf.CommonInformationEntry,
     arch: ?std.Target.Cpu.Arch,
+    reg_ctx: abi.RegisterContext,
     addr_size_bytes: u8,
     endian: std.builtin.Endian,
 ) !void {
@@ -1323,30 +1350,30 @@ fn writeOperands(
         .offset_extended,
         .offset_extended_sf,
         => |i| try writer.print(" {} {d}", .{
-            abi.fmtRegister(i.operands.register, arch),
+            fmtRegister(i.operands.register, reg_ctx, arch),
             @intCast(i64, i.operands.offset) * cie.data_alignment_factor,
         }),
         inline .restore,
         .restore_extended,
         .undefined,
         .same_value,
-        => |i| try writer.print(" {}", .{abi.fmtRegister(i.operands.register, arch)}),
+        => |i| try writer.print(" {}", .{fmtRegister(i.operands.register, reg_ctx, arch)}),
         .nop => {},
-        .register => |i| try writer.print(" {} {}", .{ abi.fmtRegister(i.operands.register, arch), abi.fmtRegister(i.operands.target_register, arch) }),
+        .register => |i| try writer.print(" {} {}", .{ fmtRegister(i.operands.register, reg_ctx, arch), fmtRegister(i.operands.target_register, reg_ctx, arch) }),
         .remember_state => {},
         .restore_state => {},
-        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ abi.fmtRegister(i.operands.register, arch), @intCast(i64, i.operands.offset) }),
-        .def_cfa_sf => |i| try writer.print(" {} {d:<1}", .{ abi.fmtRegister(i.operands.register, arch), i.operands.offset * cie.data_alignment_factor }),
-        .def_cfa_register => |i| try writer.print(" {}", .{ abi.fmtRegister(i.operands.register, arch) }),
+        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), @intCast(i64, i.operands.offset) }),
+        .def_cfa_sf => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), i.operands.offset * cie.data_alignment_factor }),
+        .def_cfa_register => |i| try writer.print(" {}", .{fmtRegister(i.operands.register, reg_ctx, arch)}),
         .def_cfa_offset => |i| try writer.print(" {d:<1}", .{@intCast(i64, i.operands.offset)}),
         .def_cfa_offset_sf => |i| try writer.print(" {d:<1}", .{i.operands.offset * cie.data_alignment_factor}),
         .def_cfa_expression => |i| {
             try writer.writeByte(' ');
-            try writeExpression(writer, i.operands.block, arch, addr_size_bytes, endian);
+            try writeExpression(writer, i.operands.block, arch, reg_ctx, addr_size_bytes, endian);
         },
         .expression => |i| {
-            try writer.print(" {} ", .{abi.fmtRegister(i.operands.register, arch)});
-            try writeExpression(writer, i.operands.block, arch, addr_size_bytes, endian);
+            try writer.print(" {} ", .{fmtRegister(i.operands.register, reg_ctx, arch)});
+            try writeExpression(writer, i.operands.block, arch, reg_ctx, addr_size_bytes, endian);
         },
         .val_offset => {},
         .val_offset_sf => {},
@@ -1356,4 +1383,157 @@ fn writeOperands(
 
 fn writeFormat(writer: anytype, frame_type: FrameType, comptime is_cie: bool) !void {
     try writer.print("  {s: <" ++ (if (is_cie) "23" else "14") ++ "}{s}\n", .{ "Format:", if (frame_type == .dwarf64) "DWARF64" else "DWARF32" });
+}
+
+fn writeUnknownReg(writer: anytype, reg_number: u8) !void {
+    try writer.print("reg{}", .{reg_number});
+}
+
+pub fn writeRegisterName(
+    writer: anytype,
+    arch: ?std.Target.Cpu.Arch,
+    reg_number: u8,
+    reg_ctx: abi.RegisterContext,
+) !void {
+    if (arch) |a| {
+        switch (a) {
+            .x86 => {
+                switch (reg_number) {
+                    0 => try writer.writeAll("EAX"),
+                    1 => try writer.writeAll("EDX"),
+                    2 => try writer.writeAll("ECX"),
+                    3 => try writer.writeAll("EBX"),
+                    4 => if (reg_ctx.eh_frame and reg_ctx.is_macho) try writer.writeAll("EBP") else try writer.writeAll("ESP"),
+                    5 => if (reg_ctx.eh_frame and reg_ctx.is_macho) try writer.writeAll("ESP") else try writer.writeAll("EBP"),
+                    6 => try writer.writeAll("ESI"),
+                    7 => try writer.writeAll("EDI"),
+                    8 => try writer.writeAll("EIP"),
+                    9 => try writer.writeAll("EFL"),
+                    10 => try writer.writeAll("CS"),
+                    11 => try writer.writeAll("SS"),
+                    12 => try writer.writeAll("DS"),
+                    13 => try writer.writeAll("ES"),
+                    14 => try writer.writeAll("FS"),
+                    15 => try writer.writeAll("GS"),
+                    16...23 => try writer.print("ST{}", .{reg_number - 16}),
+                    32...39 => try writer.print("XMM{}", .{reg_number - 32}),
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            .x86_64 => {
+                switch (reg_number) {
+                    0 => try writer.writeAll("RAX"),
+                    1 => try writer.writeAll("RDX"),
+                    2 => try writer.writeAll("RCX"),
+                    3 => try writer.writeAll("RBX"),
+                    4 => try writer.writeAll("RSI"),
+                    5 => try writer.writeAll("RDI"),
+                    6 => try writer.writeAll("RBP"),
+                    7 => try writer.writeAll("RSP"),
+                    8...15 => try writer.print("R{}", .{reg_number}),
+                    16 => try writer.writeAll("RIP"),
+                    17...32 => try writer.print("XMM{}", .{reg_number - 17}),
+                    33...40 => try writer.print("ST{}", .{reg_number - 33}),
+                    41...48 => try writer.print("MM{}", .{reg_number - 41}),
+                    49 => try writer.writeAll("RFLAGS"),
+                    50 => try writer.writeAll("ES"),
+                    51 => try writer.writeAll("CS"),
+                    52 => try writer.writeAll("SS"),
+                    53 => try writer.writeAll("DS"),
+                    54 => try writer.writeAll("FS"),
+                    55 => try writer.writeAll("GS"),
+                    // 56-57 Reserved
+                    58 => try writer.writeAll("FS.BASE"),
+                    59 => try writer.writeAll("GS.BASE"),
+                    // 60-61 Reserved
+                    62 => try writer.writeAll("TR"),
+                    63 => try writer.writeAll("LDTR"),
+                    64 => try writer.writeAll("MXCSR"),
+                    65 => try writer.writeAll("FCW"),
+                    66 => try writer.writeAll("FSW"),
+                    67...82 => try writer.print("XMM{}", .{reg_number - 51}),
+                    // 83-117 Reserved
+                    118...125 => try writer.print("K{}", .{reg_number - 118}),
+                    // 126-129 Reserved
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            .arm => {
+                switch (reg_number) {
+                    0...15 => try writer.print("R{}", .{reg_number}),
+                    // 16-63 None
+                    64...95 => try writer.print("S{}", .{reg_number - 64}),
+                    96...103 => try writer.print("F{}", .{reg_number - 96}),
+
+                    // Could also be ACC0-ACC7
+                    104...111 => try writer.print("wCGR0{}", .{reg_number - 104}),
+                    112...127 => try writer.print("wR0{}", .{reg_number - 112}),
+                    128 => try writer.writeAll("SPSR"),
+                    129 => try writer.writeAll("SPSR_FIQ"),
+                    130 => try writer.writeAll("SPSR_IRQ"),
+                    131 => try writer.writeAll("SPSR_ABT"),
+                    132 => try writer.writeAll("SPSR_UND"),
+                    133 => try writer.writeAll("SPSR_SVC"),
+                    // 134-142 None
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            .aarch64 => {
+                switch (reg_number) {
+                    0...30 => try writer.print("X{}", .{reg_number}),
+                    31 => try writer.writeAll("SP"),
+                    32 => try writer.writeAll("PC"),
+                    33 => try writer.writeAll("ELR_mode"),
+                    34 => try writer.writeAll("RA_SIGN_STATE"),
+                    35 => try writer.writeAll("TPIDRRO_ELO"),
+                    36 => try writer.writeAll("TPIDR_ELO"),
+                    37 => try writer.writeAll("TPIDR_EL1"),
+                    38 => try writer.writeAll("TPIDR_EL2"),
+                    39 => try writer.writeAll("TPIDR_EL3"),
+                    // 40-45 Reserved
+                    46 => try writer.writeAll("VG"),
+                    47 => try writer.writeAll("FFR"),
+                    48...63 => try writer.print("P{}", .{reg_number - 48}),
+                    64...95 => try writer.print("V{}", .{reg_number - 64}),
+                    96...127 => try writer.print("Z{}", .{reg_number - 96}),
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+
+            // TODO: Add aarch64
+
+            else => try writeUnknownReg(writer, reg_number),
+        }
+    } else try writeUnknownReg(writer, reg_number);
+}
+
+const FormatRegisterData = struct {
+    reg_number: u8,
+    reg_ctx: abi.RegisterContext,
+    arch: ?std.Target.Cpu.Arch,
+};
+
+pub fn formatRegister(
+    data: FormatRegisterData,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = fmt;
+    _ = options;
+    try writeRegisterName(writer, data.arch, data.reg_number, data.reg_ctx);
+}
+
+pub fn fmtRegister(
+    reg_number: u8,
+    reg_ctx: abi.RegisterContext,
+    arch: ?std.Target.Cpu.Arch,
+) std.fmt.Formatter(formatRegister) {
+    return .{
+        .data = .{
+            .reg_number = reg_number,
+            .reg_ctx = reg_ctx,
+            .arch = arch,
+        },
+    };
 }
