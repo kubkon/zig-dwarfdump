@@ -23,7 +23,7 @@ pub fn deinit(self: DwarfDump) void {
 
 pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
     const file_size = try file.getEndPos();
-    const data = try file.readToEndAlloc(gpa, file_size);
+    const data = try file.readToEndAlloc(gpa, @intCast(usize, file_size));
     errdefer gpa.free(data);
 
     var self = DwarfDump{
@@ -852,7 +852,7 @@ const FrameType = enum {
 
 const CieWithHeader = struct {
     cie: dwarf.CommonInformationEntry,
-    header: DwarfHeader,
+    header: dwarf.EntryHeader,
 
     vm: VirtualMachine = .{},
 
@@ -976,60 +976,46 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
         cies.deinit();
     }
 
-    var offset: u64 = 0;
-    while (true) {
-        if (offset >= section.data.len) break;
+    // section.offset - @ptrToInt(section.data.ptr)
 
-        const header = try DwarfHeader.parse(section.data[offset..]);
-        if (header.length == 0) {
-            try writer.print("{x:0>8} ZERO terminator", .{offset});
-            break;
+    var stream = std.io.fixedBufferStream(section.data);
+    while (stream.pos < stream.buffer.len) {
+        const entry_header = try dwarf.EntryHeader.read(&stream, write_options.endian);
+        switch (entry_header.type) {
+            .cie => {
+                const cie = try dwarf.CommonInformationEntry.parse(
+                    entry_header.entry_bytes,
+                    @intCast(i64, section.offset) - @intCast(i64, @ptrToInt(section.data.ptr)),
+                    false,
+                    entry_header.length_offset,
+                    write_options.addr_size,
+                    write_options.endian,
+                );
+
+                const entry = try cies.getOrPut(entry_header.length_offset);
+                assert(!entry.found_existing);
+                entry.value_ptr.* = .{ .cie = cie, .header = entry_header };
+
+                try self.writeCie(writer, write_options, entry.value_ptr);
+            },
+            .fde => |cie_offset| {
+                const cie_with_header = cies.getPtr(cie_offset) orelse return error.InvalidFDE;
+                const fde = try dwarf.FrameDescriptionEntry.parse(
+                    entry_header.entry_bytes,
+                    @intCast(i64, section.offset) - @intCast(i64, @ptrToInt(section.data.ptr)),
+                    false,
+                    cie_with_header.cie,
+                    write_options.addr_size,
+                    write_options.endian,
+                );
+
+                try self.writeFde(writer, write_options, cie_with_header, entry_header, fde);
+            },
+            .terminator => {
+                try writer.print("{x:0>8} ZERO terminator", .{entry_header.length_offset});
+                break;
+            },
         }
-
-        var id_offset = header.size();
-        const id = if (header.is64Bit())
-            mem.readIntLittle(u64, section.data[offset + id_offset ..][0..8])
-        else
-            mem.readIntLittle(u32, section.data[offset + id_offset ..][0..4]);
-        const id_len = @as(u8, if (header.is64Bit()) 8 else 4);
-        const tmp_offset = id_offset + id_len;
-        const entry_bytes = section.data[offset + tmp_offset ..][0 .. header.length - id_len];
-
-        // TODO: Support CommonInformationEntry.dwarf32_id, CommonInformationEntry.dwarf64_id
-
-        if (id == 0) {
-            const cie = try dwarf.CommonInformationEntry.parse(
-                entry_bytes,
-                @ptrToInt(section.data.ptr),
-                section.offset,
-                false,
-                offset,
-                write_options.addr_size,
-                write_options.endian,
-            );
-
-            const entry = try cies.getOrPut(offset);
-            assert(!entry.found_existing);
-            entry.value_ptr.* = .{ .cie = cie, .header = header };
-
-            try self.writeCie(writer, write_options, entry.value_ptr);
-        } else {
-            const cie_offset = (offset + id_offset) - id;
-            const cie_with_header = cies.getPtr(cie_offset) orelse return error.InvalidFDE;
-            const fde = try dwarf.FrameDescriptionEntry.parse(
-                entry_bytes,
-                @ptrToInt(section.data.ptr),
-                section.offset,
-                false,
-                cie_with_header.cie,
-                write_options.addr_size,
-                write_options.endian,
-            );
-
-            try self.writeFde(writer, write_options, cie_with_header, offset, header, fde);
-        }
-
-        offset += id_offset + header.length;
     }
 }
 
@@ -1044,7 +1030,7 @@ fn writeCie(
             const length_fmt = comptime frame_type.headerFormat();
             try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " CIE\n", .{
                 cie_with_header.cie.length_offset,
-                cie_with_header.header.length,
+                cie_with_header.header.entryLength(),
                 switch (frame_type) {
                     .eh => dwarf.CommonInformationEntry.eh_id,
                     .dwarf32 => dwarf.CommonInformationEntry.dwarf32_id,
@@ -1108,8 +1094,7 @@ fn writeFde(
     writer: anytype,
     options: WriteOptions,
     cie_with_header: *CieWithHeader,
-    offset: u64,
-    header: DwarfHeader,
+    header: dwarf.EntryHeader,
     fde: dwarf.FrameDescriptionEntry,
 ) !void {
     const cie = &cie_with_header.cie;
@@ -1119,9 +1104,9 @@ fn writeFde(
             // TODO: Print <invalid offset> for cie if it didn't point to an actual CIE
             const length_fmt = comptime frame_type.headerFormat();
             try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " FDE cie={x:0>8} pc={x:0>8}...{x:0>8}\n", .{
-                offset,
-                header.length,
-                (offset + header.size()) - fde.cie_length_offset,
+                header.length_offset,
+                header.entryLength(),
+                (header.length_offset + @as(u8, if (header.is_64) 12 else 4)) - fde.cie_length_offset,
                 fde.cie_length_offset,
                 fde.pc_begin,
                 fde.pc_begin + fde.pc_range,
