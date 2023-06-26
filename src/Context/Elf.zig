@@ -18,7 +18,7 @@ eh_frame: ?std.elf.Elf64_Shdr = null,
 
 pub fn isElfFile(data: []const u8) bool {
     // TODO: 32bit ELF files
-    const header = @ptrCast(*const std.elf.Elf64_Ehdr, @alignCast(@alignOf(std.elf.Elf64_Ehdr), data.ptr)).*;
+    const header = @as(*const std.elf.Elf64_Ehdr, @ptrCast(@alignCast(data.ptr))).*;
     return std.mem.eql(u8, "\x7fELF", header.e_ident[0..4]);
 }
 
@@ -38,12 +38,12 @@ pub fn parse(gpa: Allocator, data: []const u8) !*Elf {
         },
         .header = undefined,
     };
-    elf.header = @ptrCast(*const std.elf.Elf64_Ehdr, @alignCast(@alignOf(std.elf.Elf64_Ehdr), data.ptr)).*;
+    elf.header = @as(*const std.elf.Elf64_Ehdr, @ptrCast(@alignCast(data.ptr))).*;
 
     const shdrs = elf.getShdrs();
     for (shdrs) |shdr| switch (shdr.sh_type) {
         std.elf.SHT_PROGBITS => {
-            const sh_name = elf.getShString(@intCast(u32, shdr.sh_name));
+            const sh_name = elf.getShString(@as(u32, @intCast(shdr.sh_name)));
             if (std.mem.eql(u8, sh_name, ".debug_info")) {
                 elf.debug_info_sect = shdr;
             }
@@ -101,9 +101,9 @@ pub fn getShdrByName(elf: *const Elf, name: []const u8) ?std.elf.Elf64_Shdr {
 }
 
 fn getShdrs(elf: *const Elf) []const std.elf.Elf64_Shdr {
-    const shdrs = @ptrCast(
+    const shdrs = @as(
         [*]const std.elf.Elf64_Shdr,
-        @alignCast(@alignOf(std.elf.Elf64_Shdr), elf.base.data.ptr + elf.header.e_shoff),
+        @ptrCast(@alignCast(elf.base.data.ptr + elf.header.e_shoff)),
     )[0..elf.header.e_shnum];
     return shdrs;
 }
@@ -116,7 +116,7 @@ fn getShString(elf: *const Elf, off: u32) []const u8 {
     const shdr = elf.getShdrs()[elf.header.e_shstrndx];
     const shstrtab = elf.getShdrData(shdr);
     std.debug.assert(off < shstrtab.len);
-    return std.mem.sliceTo(@ptrCast([*:0]const u8, shstrtab.ptr + off), 0);
+    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(shstrtab.ptr + off)), 0);
 }
 
 pub fn getArch(elf: *const Elf) ?std.Target.Cpu.Arch {

@@ -23,7 +23,7 @@ pub fn deinit(self: DwarfDump) void {
 
 pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
     const file_size = try file.getEndPos();
-    const data = try file.readToEndAlloc(gpa, @intCast(usize, file_size));
+    const data = try file.readToEndAlloc(gpa, @intCast(file_size));
     errdefer gpa.free(data);
 
     var self = DwarfDump{
@@ -553,7 +553,7 @@ const Attribute = struct {
 
         switch (self.form) {
             dwarf.FORM.string => {
-                return mem.sliceTo(@ptrCast([*:0]const u8, debug_info.ptr), 0);
+                return mem.sliceTo(@as([*:0]const u8, @ptrCast(debug_info.ptr)), 0);
             },
             dwarf.FORM.strp => {
                 const off = if (cuh.header.is64Bit())
@@ -834,21 +834,8 @@ fn findAbbrevEntrySize(ctx: *const Context, da_off: usize, da_len: usize, di_off
 fn getDwarfString(ctx: *const Context, off: u64) []const u8 {
     const debug_str = ctx.getDebugStringData().?;
     assert(off < debug_str.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, debug_str.ptr + off), 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(debug_str.ptr + off)), 0);
 }
-
-const FrameType = enum {
-    eh,
-    dwarf32,
-    dwarf64,
-
-    pub fn headerFormat(self: FrameType) []const u8 {
-        return switch (self) {
-            .dwarf64 => "{x:0>16}",
-            else => "{x:0>8}",
-        };
-    }
-};
 
 const CieWithHeader = struct {
     cie: dwarf.CommonInformationEntry,
@@ -868,7 +855,7 @@ const CieWithHeader = struct {
 
 const WriteOptions = struct {
     llvm_compatibility: bool,
-    frame_type: FrameType,
+    frame_type: dwarf.DwarfSection,
     reg_ctx: abi.RegisterContext,
     addr_size: u8,
     endian: std.builtin.Endian,
@@ -877,7 +864,7 @@ const WriteOptions = struct {
 const Section = struct {
     data: []const u8,
     offset: u64,
-    frame_type: FrameType,
+    frame_type: dwarf.DwarfSection,
 };
 
 pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool) !void {
@@ -888,23 +875,24 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                 name: []const u8,
                 section: ?std.elf.Elf64_Shdr,
                 data: ?[]const u8,
-                frame_type: FrameType,
+                frame_type: dwarf.DwarfSection,
             }{
                 .{
                     .name = ".debug_frame",
                     .section = elf.debug_frame,
                     .data = elf.getDebugFrameData(),
-                    .frame_type = .dwarf32,
-                }, // TODO: Detect dwarf64
+                    .frame_type = .debug_frame,
+                },
                 .{
                     .name = ".eh_frame",
                     .section = elf.eh_frame,
                     .data = elf.getEhFrameData(),
-                    .frame_type = .eh,
+                    .frame_type = .eh_frame,
                 },
             };
 
-            for (sections) |section| {
+            for (sections, 0..) |section, i| {
+                if (i > 0) try writer.writeByte('\n');
                 try writer.print("{s} contents:\n\n", .{section.name});
                 if (section.section) |s| {
                     if (s.sh_type != std.elf.SHT_NULL and s.sh_type != std.elf.SHT_NOBITS) {
@@ -920,22 +908,20 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                         );
                     }
                 }
-
-                try writer.writeAll("\n");
             }
         },
         .macho => {
             const macho = self.ctx.cast(Context.MachO).?;
             const sections = [_]struct {
                 name: []const u8,
-                frame_type: FrameType,
+                frame_type: dwarf.DwarfSection,
             }{
-                .{ .name = "__debug_frame", .frame_type = .dwarf32 }, // TODO: Detect dwarf64
-                .{ .name = "__eh_frame", .frame_type = .eh },
+                .{ .name = "__debug_frame", .frame_type = .debug_frame },
+                .{ .name = "__eh_frame", .frame_type = .eh_frame },
             };
 
             for (sections) |section| {
-                try writer.print("{s} contents:\n\n", .{section.name});
+                try writer.print("\n{s} contents:\n\n", .{section.name});
                 if (macho.getSectionByName("__TEXT", section.name)) |s| {
                     try self.printEhFrame(
                         writer,
@@ -948,8 +934,6 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                         true,
                     );
                 }
-
-                try writer.writeAll("\n");
             }
         },
     }
@@ -961,7 +945,7 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
         .frame_type = section.frame_type,
 
         .reg_ctx = .{
-            .eh_frame = section.frame_type == .eh,
+            .eh_frame = section.frame_type == .eh_frame,
             .is_macho = is_macho,
         },
 
@@ -976,17 +960,16 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
         cies.deinit();
     }
 
-    // section.offset - @ptrToInt(section.data.ptr)
-
     var stream = std.io.fixedBufferStream(section.data);
     while (stream.pos < stream.buffer.len) {
-        const entry_header = try dwarf.EntryHeader.read(&stream, write_options.endian);
+        const entry_header = try dwarf.EntryHeader.read(&stream, section.frame_type, write_options.endian);
         switch (entry_header.type) {
             .cie => {
                 const cie = try dwarf.CommonInformationEntry.parse(
                     entry_header.entry_bytes,
-                    @intCast(i64, section.offset) - @intCast(i64, @ptrToInt(section.data.ptr)),
+                    @as(i64, @intCast(section.offset)) - @as(i64, @intCast(@intFromPtr(section.data.ptr))),
                     false,
+                    section.frame_type,
                     entry_header.length_offset,
                     write_options.addr_size,
                     write_options.endian,
@@ -1002,7 +985,7 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
                 const cie_with_header = cies.getPtr(cie_offset) orelse return error.InvalidFDE;
                 const fde = try dwarf.FrameDescriptionEntry.parse(
                     entry_header.entry_bytes,
-                    @intCast(i64, section.offset) - @intCast(i64, @ptrToInt(section.data.ptr)),
+                    @as(i64, @intCast(section.offset)) - @as(i64, @intCast(@intFromPtr(section.data.ptr))),
                     false,
                     cie_with_header.cie,
                     write_options.addr_size,
@@ -1012,11 +995,15 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
                 try self.writeFde(writer, write_options, cie_with_header, entry_header, fde);
             },
             .terminator => {
-                try writer.print("{x:0>8} ZERO terminator", .{entry_header.length_offset});
+                try writer.print("{x:0>8} ZERO terminator\n", .{entry_header.length_offset});
                 break;
             },
         }
     }
+}
+
+fn headerFormat(is_64: bool) []const u8 {
+    return if (is_64) "{x:0>16}" else "{x:0>8}";
 }
 
 fn writeCie(
@@ -1025,25 +1012,29 @@ fn writeCie(
     options: WriteOptions,
     cie_with_header: *CieWithHeader,
 ) !void {
-    switch (options.frame_type) {
-        inline else => |frame_type| {
-            const length_fmt = comptime frame_type.headerFormat();
+    switch (cie_with_header.header.is_64) {
+        inline else => |is_64| {
+            const length_fmt = comptime headerFormat(is_64);
             try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " CIE\n", .{
                 cie_with_header.cie.length_offset,
                 cie_with_header.header.entryLength(),
-                switch (frame_type) {
-                    .eh => dwarf.CommonInformationEntry.eh_id,
-                    .dwarf32 => dwarf.CommonInformationEntry.dwarf32_id,
-                    .dwarf64 => dwarf.CommonInformationEntry.dwarf64_id,
-                },
+                @as(u64, switch (options.frame_type) {
+                    .eh_frame => dwarf.CommonInformationEntry.eh_id,
+                    .debug_frame => if (is_64) dwarf.CommonInformationEntry.dwarf64_id else dwarf.CommonInformationEntry.dwarf32_id,
+                    else => unreachable,
+                }),
             });
-        },
+        }
     }
 
     const cie = &cie_with_header.cie;
-    try writeFormat(writer, options.frame_type, true);
+    try writeFormat(writer, cie_with_header.header.is_64, true);
     try writer.print("  {s: <23}{}\n", .{ "Version:", cie.version });
     try writer.print("  {s: <23}\"{s}\"\n", .{ "Augmentation:", cie.aug_str });
+    if (cie_with_header.cie.version == 4) {
+        try writer.print("  {s: <23}{}\n", .{ "Address size:", cie.address_size });
+        try writer.print("  {s: <23}{}\n", .{ "Segment desc size:", cie.segment_selector_size.? });
+    }
     try writer.print("  {s: <23}{}\n", .{ "Code alignment factor:", cie.code_alignment_factor });
     try writer.print("  {s: <23}{}\n", .{ "Data alignment factor:", cie.data_alignment_factor });
     try writer.print("  {s: <23}{}\n", .{ "Return address column:", cie.return_address_register });
@@ -1099,22 +1090,26 @@ fn writeFde(
 ) !void {
     const cie = &cie_with_header.cie;
 
-    switch (options.frame_type) {
-        inline else => |frame_type| {
-            // TODO: Print <invalid offset> for cie if it didn't point to an actual CIE
-            const length_fmt = comptime frame_type.headerFormat();
+    // TODO: Print <invalid offset> for cie if it didn't point to an actual CIE
+    switch (cie_with_header.header.is_64) {
+        inline else => |is_64| {
+            const length_fmt = comptime headerFormat(is_64);
             try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " FDE cie={x:0>8} pc={x:0>8}...{x:0>8}\n", .{
                 header.length_offset,
                 header.entryLength(),
-                (header.length_offset + @as(u8, if (header.is_64) 12 else 4)) - fde.cie_length_offset,
+                switch (options.frame_type) {
+                    .eh_frame => (header.length_offset + @as(u8, if (header.is_64) 12 else 4)) - fde.cie_length_offset,
+                    .debug_frame => fde.cie_length_offset,
+                    else => unreachable,
+                },
                 fde.cie_length_offset,
                 fde.pc_begin,
                 fde.pc_begin + fde.pc_range,
             });
-        },
+        }
     }
 
-    try writeFormat(writer, options.frame_type, false);
+    try writeFormat(writer, cie_with_header.header.is_64, false);
     if (fde.lsda_pointer) |p| try writer.print("  LSDA Address: {x:0>16}\n", .{p});
 
     if (!options.llvm_compatibility) {
@@ -1176,7 +1171,7 @@ fn writeRow(
     var num_printed: usize = 0;
     for (0..256) |register| {
         for (columns) |column| {
-            if (column.register == @intCast(u8, register)) {
+            if (column.register == @as(u8, @intCast(register))) {
                 if (try writeColumnRule(column, writer, false, self.ctx.getArch(), reg_ctx, addr_size, endian)) {
                     if (num_printed != columns.len - 1) {
                         try writer.writeAll(", ");
@@ -1336,7 +1331,7 @@ fn writeOperands(
         .offset_extended_sf,
         => |i| try writer.print(" {} {d}", .{
             fmtRegister(i.operands.register, reg_ctx, arch),
-            @intCast(i64, i.operands.offset) * cie.data_alignment_factor,
+            @as(i64, @intCast(i.operands.offset)) * cie.data_alignment_factor,
         }),
         inline .restore,
         .restore_extended,
@@ -1347,10 +1342,10 @@ fn writeOperands(
         .register => |i| try writer.print(" {} {}", .{ fmtRegister(i.operands.register, reg_ctx, arch), fmtRegister(i.operands.target_register, reg_ctx, arch) }),
         .remember_state => {},
         .restore_state => {},
-        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), @intCast(i64, i.operands.offset) }),
+        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), @as(i64, @intCast(i.operands.offset)) }),
         .def_cfa_sf => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), i.operands.offset * cie.data_alignment_factor }),
         .def_cfa_register => |i| try writer.print(" {}", .{fmtRegister(i.operands.register, reg_ctx, arch)}),
-        .def_cfa_offset => |i| try writer.print(" {d:<1}", .{@intCast(i64, i.operands.offset)}),
+        .def_cfa_offset => |i| try writer.print(" {d:<1}", .{@as(i64, @intCast(i.operands.offset))}),
         .def_cfa_offset_sf => |i| try writer.print(" {d:<1}", .{i.operands.offset * cie.data_alignment_factor}),
         .def_cfa_expression => |i| {
             try writer.writeByte(' ');
@@ -1366,8 +1361,8 @@ fn writeOperands(
     }
 }
 
-fn writeFormat(writer: anytype, frame_type: FrameType, comptime is_cie: bool) !void {
-    try writer.print("  {s: <" ++ (if (is_cie) "23" else "14") ++ "}{s}\n", .{ "Format:", if (frame_type == .dwarf64) "DWARF64" else "DWARF32" });
+fn writeFormat(writer: anytype, is_64: bool, comptime is_cie: bool) !void {
+    try writer.print("  {s: <" ++ (if (is_cie) "23" else "14") ++ "}{s}\n", .{ "Format:", if (is_64) "DWARF64" else "DWARF32" });
 }
 
 fn writeUnknownReg(writer: anytype, reg_number: u8) !void {

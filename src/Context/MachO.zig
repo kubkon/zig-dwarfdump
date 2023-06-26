@@ -15,7 +15,7 @@ debug_abbrev_sect: ?std.macho.section_64 = null,
 debug_string_sect: ?std.macho.section_64 = null,
 
 pub fn isMachOFile(data: []const u8) bool {
-    const header = @ptrCast(*const std.macho.mach_header_64, @alignCast(@alignOf(std.macho.mach_header_64), data.ptr)).*;
+    const header = @as(*const std.macho.mach_header_64, @ptrCast(@alignCast(data.ptr))).*;
     return header.magic == std.macho.MH_MAGIC_64;
 }
 
@@ -36,7 +36,7 @@ pub fn parse(gpa: Allocator, data: []const u8) !*MachO {
         .header = undefined,
     };
 
-    macho.header = @ptrCast(*const std.macho.mach_header_64, @alignCast(@alignOf(std.macho.mach_header_64), data.ptr)).*;
+    macho.header = @as(*const std.macho.mach_header_64, @ptrCast(@alignCast(data.ptr))).*;
 
     var it = macho.getLoadCommandsIterator();
     while (it.next()) |lc| switch (lc.cmd()) {
@@ -92,7 +92,7 @@ pub fn getSectionByName(macho: *const MachO, segname: []const u8, sectname: []co
 }
 
 pub fn getSectionData(macho: *const MachO, sect: std.macho.section_64) []const u8 {
-    const size = @intCast(usize, sect.size);
+    const size = @as(usize, @intCast(sect.size));
     return macho.base.data[sect.offset..][0..size];
 }
 
@@ -105,7 +105,7 @@ pub fn isARM(macho: *const MachO) bool {
 }
 
 fn getLoadCommandsIterator(macho: *const MachO) std.macho.LoadCommandIterator {
-    const data = @alignCast(@alignOf(u64), macho.base.data[@sizeOf(std.macho.mach_header_64)..])[0..macho.header.sizeofcmds];
+    const data = @as([]align(8) const u8, @alignCast(macho.base.data[@sizeOf(std.macho.mach_header_64)..]))[0..macho.header.sizeofcmds];
     return .{
         .ncmds = macho.header.ncmds,
         .buffer = data,
