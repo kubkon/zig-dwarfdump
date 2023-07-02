@@ -113,6 +113,9 @@ fn getLoadCommandsIterator(macho: *const MachO) std.macho.LoadCommandIterator {
 }
 
 pub fn getArch(macho: *const MachO) ?std.Target.Cpu.Arch {
-    _ = macho;
-    return null;
+    return switch (macho.header.cputype) {
+        std.macho.CPU_TYPE_ARM64 => .aarch64,
+        std.macho.CPU_TYPE_X86_64 => .x86_64,
+        else => null,
+    };
 }

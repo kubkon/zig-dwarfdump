@@ -916,13 +916,19 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                 name: []const u8,
                 frame_type: dwarf.DwarfSection,
             }{
-                .{ .name = "__debug_frame", .frame_type = .debug_frame },
-                .{ .name = "__eh_frame", .frame_type = .eh_frame },
+                .{
+                    .name = "__debug_frame",
+                    .frame_type = .debug_frame,
+                },
+                .{
+                    .name = "__eh_frame",
+                    .frame_type = .eh_frame,
+                },
             };
 
             for (sections) |section| {
-                try writer.print("\n{s} contents:\n\n", .{section.name});
-                if (macho.getSectionByName("__TEXT", section.name)) |s| {
+                try writer.print("\n.{s} contents:\n\n", .{@tagName(section.frame_type)});
+                if (macho.getSectionByName("__DWARF", section.name)) |s| {
                     try self.printEhFrame(
                         writer,
                         llvm_compatibility,
@@ -1024,7 +1030,7 @@ fn writeCie(
                     else => unreachable,
                 }),
             });
-        }
+        },
     }
 
     const cie = &cie_with_header.cie;
@@ -1106,7 +1112,7 @@ fn writeFde(
                 fde.pc_begin,
                 fde.pc_begin + fde.pc_range,
             });
-        }
+        },
     }
 
     try writeFormat(writer, cie_with_header.header.is_64, false);
