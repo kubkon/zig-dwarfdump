@@ -1281,7 +1281,7 @@ fn writeExpression(
                     const StackMachine = dwarf.expressions.StackMachine(.{
                         .addr_size = size,
                         .endian = e,
-                        .call_frame_mode = true,
+                        .call_frame_context = true,
                     });
 
                     const reader = stream.reader();
@@ -1293,7 +1293,7 @@ fn writeExpression(
                             try writer.print("DW_OP_{s}", .{opcode_name});
                         } else {
                             // TODO: See how llvm-dwarfdump prints these?
-                            if (opcode >= dwarf.OP.lo_user and opcode <= dwarf.OP.lo_user) {
+                            if (opcode >= dwarf.OP.lo_user and opcode <= dwarf.OP.hi_user) {
                                 try writer.print("<unknown vendor opcode: 0x{x}>", .{opcode});
                             } else {
                                 try writer.print("<invalid opcode: 0x{x}>", .{opcode});
