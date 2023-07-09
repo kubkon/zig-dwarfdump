@@ -975,6 +975,7 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
                     entry_header.entry_bytes,
                     @as(i64, @intCast(section.offset)) - @as(i64, @intCast(@intFromPtr(section.data.ptr))),
                     false,
+                    entry_header.is_64,
                     section.frame_type,
                     entry_header.length_offset,
                     write_options.addr_size,
@@ -1018,6 +1019,10 @@ fn writeCie(
     options: WriteOptions,
     cie_with_header: *CieWithHeader,
 ) !void {
+    const expression_context = dwarf.expressions.ExpressionContext{
+        .is_64 = cie_with_header.header.is_64,
+    };
+
     switch (cie_with_header.header.is_64) {
         inline else => |is_64| {
             const length_fmt = comptime headerFormat(is_64);
@@ -1071,7 +1076,16 @@ fn writeCie(
             const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
             const opcode = std.meta.activeTag(instruction);
             try writer.print("  DW_CFA_{s}:", .{@tagName(opcode)});
-            try writeOperands(instruction, writer, cie.*, self.ctx.getArch(), options.reg_ctx, options.addr_size, options.endian);
+            try writeOperands(
+                instruction,
+                writer,
+                cie.*,
+                self.ctx.getArch(),
+                expression_context,
+                options.reg_ctx,
+                options.addr_size,
+                options.endian,
+            );
             _ = try cie_with_header.vm.step(self.gpa, cie.*, true, instruction);
             try writer.writeByte('\n');
         }
@@ -1079,7 +1093,15 @@ fn writeCie(
 
     try writer.writeAll("\n");
     if (cie_with_header.vm.current_row.cfa.rule != .default) try writer.writeAll("  ");
-    try self.writeRow(writer, cie_with_header.vm, cie_with_header.vm.current_row, options.reg_ctx, options.addr_size, options.endian);
+    try self.writeRow(
+        writer,
+        cie_with_header.vm,
+        cie_with_header.vm.current_row,
+        expression_context,
+        options.reg_ctx,
+        options.addr_size,
+        options.endian,
+    );
     try writer.writeByte('\n');
 
     cie_with_header.vm_snapshot_columns = cie_with_header.vm.columns.items.len;
@@ -1095,6 +1117,9 @@ fn writeFde(
     fde: dwarf.FrameDescriptionEntry,
 ) !void {
     const cie = &cie_with_header.cie;
+    const expression_context = dwarf.expressions.ExpressionContext{
+        .is_64 = cie.is_64,
+    };
 
     // TODO: Print <invalid offset> for cie if it didn't point to an actual CIE
     switch (cie_with_header.header.is_64) {
@@ -1129,7 +1154,16 @@ fn writeFde(
         const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
         const opcode = std.meta.activeTag(instruction);
         try writer.print("  DW_CFA_{s}:", .{@tagName(opcode)});
-        try writeOperands(instruction, writer, cie.*, self.ctx.getArch(), options.reg_ctx, options.addr_size, options.endian);
+        try writeOperands(
+            instruction,
+            writer,
+            cie.*,
+            self.ctx.getArch(),
+            expression_context,
+            options.reg_ctx,
+            options.addr_size,
+            options.endian,
+        );
         try writer.writeByte('\n');
     }
 
@@ -1142,12 +1176,28 @@ fn writeFde(
         var prev_row = try cie_with_header.vm.step(self.gpa, cie.*, false, instruction);
         if (cie_with_header.vm.current_row.offset != prev_row.offset) {
             try writer.print("  0x{x}: ", .{fde.pc_begin + prev_row.offset});
-            try self.writeRow(writer, cie_with_header.vm, prev_row, options.reg_ctx, options.addr_size, options.endian);
+            try self.writeRow(
+                writer,
+                cie_with_header.vm,
+                prev_row,
+                expression_context,
+                options.reg_ctx,
+                options.addr_size,
+                options.endian,
+            );
         }
     }
 
     try writer.print("  0x{x}: ", .{fde.pc_begin + cie_with_header.vm.current_row.offset});
-    try self.writeRow(writer, cie_with_header.vm, cie_with_header.vm.current_row, options.reg_ctx, options.addr_size, options.endian);
+    try self.writeRow(
+        writer,
+        cie_with_header.vm,
+        cie_with_header.vm.current_row,
+        expression_context,
+        options.reg_ctx,
+        options.addr_size,
+        options.endian,
+    );
 
     // Restore the VM state to the result of the initial CIE instructions
     cie_with_header.vm.columns.items.len = cie_with_header.vm_snapshot_columns;
@@ -1162,12 +1212,22 @@ fn writeRow(
     writer: anytype,
     vm: VirtualMachine,
     row: VirtualMachine.Row,
+    expression_context: dwarf.expressions.ExpressionContext,
     reg_ctx: abi.RegisterContext,
     addr_size: u8,
     endian: std.builtin.Endian,
 ) !void {
     var wrote_anything = false;
-    if (try writeColumnRule(row.cfa, writer, true, self.ctx.getArch(), reg_ctx, addr_size, endian)) {
+    if (try writeColumnRule(
+        row.cfa,
+        writer,
+        true,
+        self.ctx.getArch(),
+        expression_context,
+        reg_ctx,
+        addr_size,
+        endian,
+    )) {
         try writer.writeAll(": ");
         wrote_anything = true;
     }
@@ -1178,7 +1238,16 @@ fn writeRow(
     for (0..256) |register| {
         for (columns) |column| {
             if (column.register == @as(u8, @intCast(register))) {
-                if (try writeColumnRule(column, writer, false, self.ctx.getArch(), reg_ctx, addr_size, endian)) {
+                if (try writeColumnRule(
+                    column,
+                    writer,
+                    false,
+                    self.ctx.getArch(),
+                    expression_context,
+                    reg_ctx,
+                    addr_size,
+                    endian,
+                )) {
                     if (num_printed != columns.len - 1) {
                         try writer.writeAll(", ");
                     }
@@ -1200,6 +1269,7 @@ pub fn writeColumnRule(
     writer: anytype,
     is_cfa: bool,
     arch: ?std.Target.Cpu.Arch,
+    expression_context: dwarf.expressions.ExpressionContext,
     reg_ctx: abi.RegisterContext,
     addr_size_bytes: u8,
     endian: std.builtin.Endian,
@@ -1243,7 +1313,7 @@ pub fn writeColumnRule(
         .register => |register| try writeRegisterName(writer, arch, register, reg_ctx),
         .expression => |expression| {
             if (!is_cfa) try writer.writeByte('[');
-            try writeExpression(writer, expression, arch, reg_ctx, addr_size_bytes, endian);
+            try writeExpression(writer, expression, arch, expression_context, reg_ctx, addr_size_bytes, endian);
             if (!is_cfa) try writer.writeByte(']');
         },
         .val_expression => try writer.writeAll("TODO(val_expression)"),
@@ -1257,6 +1327,7 @@ fn writeExpression(
     writer: anytype,
     block: []const u8,
     arch: ?std.Target.Cpu.Arch,
+    expression_context: dwarf.expressions.ExpressionContext,
     reg_ctx: abi.RegisterContext,
     addr_size_bytes: u8,
     endian: std.builtin.Endian,
@@ -1300,7 +1371,7 @@ fn writeExpression(
                             }
                         }
 
-                        if (try StackMachine.readOperand(&stream, opcode)) |value| {
+                        if (try StackMachine.readOperand(&stream, opcode, expression_context)) |value| {
                             switch (value) {
                                 .generic => {}, // Constant values are implied by the opcode name
                                 .register => |v| try writer.print(" {}", .{fmtRegister(v, reg_ctx, arch)}),
@@ -1321,6 +1392,7 @@ fn writeOperands(
     writer: anytype,
     cie: dwarf.CommonInformationEntry,
     arch: ?std.Target.Cpu.Arch,
+    expression_context: dwarf.expressions.ExpressionContext,
     reg_ctx: abi.RegisterContext,
     addr_size_bytes: u8,
     endian: std.builtin.Endian,
@@ -1355,11 +1427,11 @@ fn writeOperands(
         .def_cfa_offset_sf => |i| try writer.print(" {d:<1}", .{i.operands.offset * cie.data_alignment_factor}),
         .def_cfa_expression => |i| {
             try writer.writeByte(' ');
-            try writeExpression(writer, i.operands.block, arch, reg_ctx, addr_size_bytes, endian);
+            try writeExpression(writer, i.operands.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
         },
         .expression => |i| {
             try writer.print(" {} ", .{fmtRegister(i.operands.register, reg_ctx, arch)});
-            try writeExpression(writer, i.operands.block, arch, reg_ctx, addr_size_bytes, endian);
+            try writeExpression(writer, i.operands.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
         },
         .val_offset => {},
         .val_offset_sf => {},
