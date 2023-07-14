@@ -1217,6 +1217,8 @@ fn writeRow(
     addr_size: u8,
     endian: std.builtin.Endian,
 ) !void {
+    const columns = vm.rowColumns(row);
+
     var wrote_anything = false;
     if (try writeColumnRule(
         row.cfa,
@@ -1228,12 +1230,11 @@ fn writeRow(
         addr_size,
         endian,
     )) {
-        try writer.writeAll(": ");
+        if (columns.len > 0) try writer.writeAll(": ");
         wrote_anything = true;
     }
 
     // llvm-dwarfdump prints columns sorted by register number
-    const columns = vm.rowColumns(row);
     var num_printed: usize = 0;
     for (0..256) |register| {
         for (columns) |column| {
@@ -1538,8 +1539,8 @@ pub fn writeRegisterName(
             },
             .aarch64 => {
                 switch (reg_number) {
-                    0...30 => try writer.print("X{}", .{reg_number}),
-                    31 => try writer.writeAll("SP"),
+                    0...30 => try writer.print("W{}", .{reg_number}),
+                    31 => try writer.writeAll("WSP"),
                     32 => try writer.writeAll("PC"),
                     33 => try writer.writeAll("ELR_mode"),
                     34 => try writer.writeAll("RA_SIGN_STATE"),
@@ -1557,9 +1558,6 @@ pub fn writeRegisterName(
                     else => try writeUnknownReg(writer, reg_number),
                 }
             },
-
-            // TODO: Add aarch64
-
             else => try writeUnknownReg(writer, reg_number),
         }
     } else try writeUnknownReg(writer, reg_number);
