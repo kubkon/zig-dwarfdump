@@ -928,13 +928,13 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
 
             for (sections) |section| {
                 try writer.print("\n.{s} contents:\n\n", .{@tagName(section.frame_type)});
-                if (macho.getSectionByName("__DWARF", section.name)) |s| {
+                if (macho.getSectionByName("__TEXT", section.name)) |s| {
                     try self.printEhFrame(
                         writer,
                         llvm_compatibility,
                         .{
                             .data = macho.getSectionData(s),
-                            .offset = s.offset,
+                            .offset = s.addr,
                             .frame_type = section.frame_type,
                         },
                         true,
@@ -1220,6 +1220,7 @@ fn writeRow(
     const columns = vm.rowColumns(row);
 
     var wrote_anything = false;
+    var wrote_separator = false;
     if (try writeColumnRule(
         row.cfa,
         writer,
@@ -1230,7 +1231,6 @@ fn writeRow(
         addr_size,
         endian,
     )) {
-        if (columns.len > 0) try writer.writeAll(": ");
         wrote_anything = true;
     }
 
@@ -1239,6 +1239,11 @@ fn writeRow(
     for (0..256) |register| {
         for (columns) |column| {
             if (column.register == @as(u8, @intCast(register))) {
+                if (column.rule != .default and !wrote_separator) {
+                    try writer.writeAll(": ");
+                    wrote_separator = true;
+                }
+
                 if (try writeColumnRule(
                     column,
                     writer,
@@ -1553,7 +1558,7 @@ pub fn writeRegisterName(
                     46 => try writer.writeAll("VG"),
                     47 => try writer.writeAll("FFR"),
                     48...63 => try writer.print("P{}", .{reg_number - 48}),
-                    64...95 => try writer.print("V{}", .{reg_number - 64}),
+                    64...95 => try writer.print("B{}", .{reg_number - 64}),
                     96...127 => try writer.print("Z{}", .{reg_number - 96}),
                     else => try writeUnknownReg(writer, reg_number),
                 }

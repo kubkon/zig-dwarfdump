@@ -43,10 +43,14 @@ pub fn main() !void {
     defer dd.deinit();
 
     if (res.args.@"eh-frame" != 0) {
-        try stdout.print("{s}:\tfile format {s}-{s}\n\n", .{ filename, switch (dd.ctx.tag) {
-            .elf => "elf64",
-            .macho => "Mach-O 64-bit",
-        }, if (dd.ctx.getArch()) |arch| @tagName(arch) else "unknown" });
+        try stdout.print("{s}:\tfile format {s}{s}\n", .{ filename, switch (dd.ctx.tag) {
+            .elf => "elf64-",
+            .macho => "Mach-O ",
+        }, if (dd.ctx.getArch()) |arch| switch (arch) {
+            .x86_64 => "x86_64",
+            .aarch64 => "arm64",
+            else => @tagName(arch),
+        } else "unknown" });
 
         try dd.printEhFrames(stdout, res.args.@"llvm-compatibility" != 0);
     } else try dd.printCompileUnits(stdout);
