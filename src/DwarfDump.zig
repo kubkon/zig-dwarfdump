@@ -90,7 +90,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
             while (try attr_it.next()) |attr| {
                 try formatIndent(children * 2, writer);
                 try writer.print("{s: <22}{s: <30}", .{ "", try formatATName(attr.value.name, &buffer) });
-                try formatIndent(max_indent - children * 2, writer);
+                try formatIndent(max_indent - @min(max_indent, children * 2), writer);
 
                 switch (attr.value.name) {
                     dwarf.AT.stmt_list,
