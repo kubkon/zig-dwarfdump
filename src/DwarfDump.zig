@@ -901,7 +901,7 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                             llvm_compatibility,
                             .{
                                 .data = section.data.?,
-                                .offset = s.sh_offset,
+                                .offset = s.sh_addr,
                                 .frame_type = section.frame_type,
                             },
                             false,
@@ -1404,40 +1404,40 @@ fn writeOperands(
     endian: std.builtin.Endian,
 ) !void {
     switch (instruction) {
-        .set_loc => |i| try writer.print(" 0x{x}", .{i.operands.address}),
+        .set_loc => |i| try writer.print(" 0x{x}", .{i.address}),
         inline .advance_loc,
         .advance_loc1,
         .advance_loc2,
         .advance_loc4,
-        => |i| try writer.print(" {}", .{i.operands.delta * cie.code_alignment_factor}),
+        => |i| try writer.print(" {}", .{i.delta * cie.code_alignment_factor}),
         inline .offset,
         .offset_extended,
         .offset_extended_sf,
         => |i| try writer.print(" {} {d}", .{
-            fmtRegister(i.operands.register, reg_ctx, arch),
-            @as(i64, @intCast(i.operands.offset)) * cie.data_alignment_factor,
+            fmtRegister(i.register, reg_ctx, arch),
+            @as(i64, @intCast(i.offset)) * cie.data_alignment_factor,
         }),
         inline .restore,
         .restore_extended,
         .undefined,
         .same_value,
-        => |i| try writer.print(" {}", .{fmtRegister(i.operands.register, reg_ctx, arch)}),
+        => |i| try writer.print(" {}", .{fmtRegister(i.register, reg_ctx, arch)}),
         .nop => {},
-        .register => |i| try writer.print(" {} {}", .{ fmtRegister(i.operands.register, reg_ctx, arch), fmtRegister(i.operands.target_register, reg_ctx, arch) }),
+        .register => |i| try writer.print(" {} {}", .{ fmtRegister(i.register, reg_ctx, arch), fmtRegister(i.target_register, reg_ctx, arch) }),
         .remember_state => {},
         .restore_state => {},
-        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), @as(i64, @intCast(i.operands.offset)) }),
-        .def_cfa_sf => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.operands.register, reg_ctx, arch), i.operands.offset * cie.data_alignment_factor }),
-        .def_cfa_register => |i| try writer.print(" {}", .{fmtRegister(i.operands.register, reg_ctx, arch)}),
-        .def_cfa_offset => |i| try writer.print(" {d:<1}", .{@as(i64, @intCast(i.operands.offset))}),
-        .def_cfa_offset_sf => |i| try writer.print(" {d:<1}", .{i.operands.offset * cie.data_alignment_factor}),
+        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.register, reg_ctx, arch), @as(i64, @intCast(i.offset)) }),
+        .def_cfa_sf => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.register, reg_ctx, arch), i.offset * cie.data_alignment_factor }),
+        .def_cfa_register => |i| try writer.print(" {}", .{fmtRegister(i.register, reg_ctx, arch)}),
+        .def_cfa_offset => |i| try writer.print(" {d:<1}", .{@as(i64, @intCast(i.offset))}),
+        .def_cfa_offset_sf => |i| try writer.print(" {d:<1}", .{i.offset * cie.data_alignment_factor}),
         .def_cfa_expression => |i| {
             try writer.writeByte(' ');
-            try writeExpression(writer, i.operands.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
+            try writeExpression(writer, i.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
         },
         .expression => |i| {
-            try writer.print(" {} ", .{fmtRegister(i.operands.register, reg_ctx, arch)});
-            try writeExpression(writer, i.operands.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
+            try writer.print(" {} ", .{fmtRegister(i.register, reg_ctx, arch)});
+            try writeExpression(writer, i.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
         },
         .val_offset => {},
         .val_offset_sf => {},
