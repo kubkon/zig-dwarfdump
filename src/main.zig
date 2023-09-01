@@ -13,6 +13,7 @@ pub fn main() !void {
     const params = comptime [_]clap.Param(clap.Help){
         clap.parseParam("--help                 Display this help and exit.") catch unreachable,
         clap.parseParam("--eh-frame             Display .eh_frame section contents.") catch unreachable,
+        clap.parseParam("--llvm-compatibility   Output is formatted exactly like llvm-dwarfdump, with no extra information.") catch unreachable,
         clap.parseParam("<FILE>") catch unreachable,
     };
 
@@ -26,7 +27,7 @@ pub fn main() !void {
     });
     defer res.deinit();
 
-    if (res.args.help) {
+    if (res.args.help != 0) {
         return printUsageWithHelp(stderr, params[0..]);
     }
 
@@ -41,8 +42,17 @@ pub fn main() !void {
     var dd = try DwarfDump.parse(gpa.allocator(), file);
     defer dd.deinit();
 
-    if (res.args.@"eh-frame") {
-        try dd.printEhFrame(stdout);
+    if (res.args.@"eh-frame" != 0) {
+        try stdout.print("{s}:\tfile format {s}{s}\n", .{ filename, switch (dd.ctx.tag) {
+            .elf => "elf64-",
+            .macho => "Mach-O ",
+        }, if (dd.ctx.getArch()) |arch| switch (arch) {
+            .x86_64 => "x86_64",
+            .aarch64 => "arm64",
+            else => @tagName(arch),
+        } else "unknown" });
+
+        try dd.printEhFrames(stdout, res.args.@"llvm-compatibility" != 0);
     } else try dd.printCompileUnits(stdout);
 }
 

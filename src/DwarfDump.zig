@@ -3,6 +3,7 @@ const DwarfDump = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const dwarf = std.dwarf;
+const abi = dwarf.abi;
 const leb = std.leb;
 const log = std.log;
 const fs = std.fs;
@@ -11,6 +12,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const AbbrevLookupTable = std.AutoHashMap(u64, struct { pos: usize, len: usize });
 const Context = @import("Context.zig");
+const VirtualMachine = dwarf.call_frame.VirtualMachine;
 
 gpa: Allocator,
 ctx: *Context,
@@ -21,7 +23,7 @@ pub fn deinit(self: DwarfDump) void {
 
 pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
     const file_size = try file.getEndPos();
-    const data = try file.readToEndAlloc(gpa, file_size);
+    const data = try file.readToEndAlloc(gpa, @intCast(file_size));
     errdefer gpa.free(data);
 
     var self = DwarfDump{
@@ -88,7 +90,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
             while (try attr_it.next()) |attr| {
                 try formatIndent(children * 2, writer);
                 try writer.print("{s: <22}{s: <30}", .{ "", try formatATName(attr.value.name, &buffer) });
-                try formatIndent(max_indent - children * 2, writer);
+                try formatIndent(max_indent - @min(max_indent, children * 2), writer);
 
                 switch (attr.value.name) {
                     dwarf.AT.stmt_list,
@@ -551,7 +553,7 @@ const Attribute = struct {
 
         switch (self.form) {
             dwarf.FORM.string => {
-                return mem.sliceTo(@ptrCast([*:0]const u8, debug_info.ptr), 0);
+                return mem.sliceTo(@as([*:0]const u8, @ptrCast(debug_info.ptr)), 0);
             },
             dwarf.FORM.strp => {
                 const off = if (cuh.header.is64Bit())
@@ -832,270 +834,767 @@ fn findAbbrevEntrySize(ctx: *const Context, da_off: usize, da_len: usize, di_off
 fn getDwarfString(ctx: *const Context, off: u64) []const u8 {
     const debug_str = ctx.getDebugStringData().?;
     assert(off < debug_str.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, debug_str.ptr + off), 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(debug_str.ptr + off)), 0);
 }
 
-pub fn printEhFrame(self: DwarfDump, writer: anytype) !void {
+const CieWithHeader = struct {
+    cie: dwarf.CommonInformationEntry,
+    header: dwarf.EntryHeader,
+
+    vm: VirtualMachine = .{},
+
+    // Instead of re-running the CIE instructions to print each FDE, the vm state
+    // is restored to the post-CIE state instead.
+    vm_snapshot_columns: usize = undefined,
+    vm_snapshot_row: VirtualMachine.Row = undefined,
+
+    pub fn deinit(self: *CieWithHeader, allocator: mem.Allocator) void {
+        self.vm.deinit(allocator);
+    }
+};
+
+const WriteOptions = struct {
+    llvm_compatibility: bool,
+    frame_type: dwarf.DwarfSection,
+    reg_ctx: abi.RegisterContext,
+    addr_size: u8,
+    endian: std.builtin.Endian,
+};
+
+const Section = struct {
+    data: []const u8,
+    offset: u64,
+    frame_type: dwarf.DwarfSection,
+};
+
+pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool) !void {
     switch (self.ctx.tag) {
-        .elf => return error.Unimplemented,
-        .macho => {},
-    }
+        .elf => {
+            const elf = self.ctx.cast(Context.Elf).?;
+            const sections = [_]struct {
+                name: []const u8,
+                section: ?std.elf.Elf64_Shdr,
+                data: ?[]const u8,
+                frame_type: dwarf.DwarfSection,
+            }{
+                .{
+                    .name = ".debug_frame",
+                    .section = elf.debug_frame,
+                    .data = elf.getDebugFrameData(),
+                    .frame_type = .debug_frame,
+                },
+                .{
+                    .name = ".eh_frame",
+                    .section = elf.eh_frame,
+                    .data = elf.getEhFrameData(),
+                    .frame_type = .eh_frame,
+                },
+            };
 
-    const macho = self.ctx.cast(Context.MachO).?;
-    const addr_size: u8 = 8;
-    const sect = macho.getSectionByName("__TEXT", "__eh_frame") orelse {
-        try writer.print("No __TEXT,__eh_frame section.\n", .{});
-        return;
+            for (sections, 0..) |section, i| {
+                if (i > 0) try writer.writeByte('\n');
+                try writer.print("{s} contents:\n\n", .{section.name});
+                if (section.section) |s| {
+                    if (s.sh_type != std.elf.SHT_NULL and s.sh_type != std.elf.SHT_NOBITS) {
+                        try self.printEhFrame(
+                            writer,
+                            llvm_compatibility,
+                            .{
+                                .data = section.data.?,
+                                .offset = s.sh_addr,
+                                .frame_type = section.frame_type,
+                            },
+                            false,
+                        );
+                    }
+                }
+            }
+        },
+        .macho => {
+            const macho = self.ctx.cast(Context.MachO).?;
+            const sections = [_]struct {
+                name: []const u8,
+                frame_type: dwarf.DwarfSection,
+            }{
+                .{
+                    .name = "__debug_frame",
+                    .frame_type = .debug_frame,
+                },
+                .{
+                    .name = "__eh_frame",
+                    .frame_type = .eh_frame,
+                },
+            };
+
+            for (sections) |section| {
+                try writer.print("\n.{s} contents:\n\n", .{@tagName(section.frame_type)});
+                if (macho.getSectionByName("__TEXT", section.name)) |s| {
+                    try self.printEhFrame(
+                        writer,
+                        llvm_compatibility,
+                        .{
+                            .data = macho.getSectionData(s),
+                            .offset = s.addr,
+                            .frame_type = section.frame_type,
+                        },
+                        true,
+                    );
+                }
+            }
+        },
+    }
+}
+
+pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, section: Section, is_macho: bool) !void {
+    const write_options = WriteOptions{
+        .llvm_compatibility = llvm_compatibility,
+        .frame_type = section.frame_type,
+
+        .reg_ctx = .{
+            .eh_frame = section.frame_type == .eh_frame,
+            .is_macho = is_macho,
+        },
+
+        // TODO: Use the addr size / endianness of the file, provide in section
+        .addr_size = @sizeOf(usize),
+        .endian = .Little,
     };
 
-    var cies = std.AutoArrayHashMap(u64, CommonInformationEntry).init(self.gpa);
-    defer cies.deinit();
-
-    var fdes = std.ArrayList(struct { fde: FrameDescriptionEntry, offset: u64 }).init(self.gpa);
-    defer fdes.deinit();
-
-    const data = macho.getSectionData(sect);
-    var offset: u64 = 0;
-
-    while (true) {
-        if (offset >= data.len) break;
-
-        const header = try DwarfHeader.parse(data[offset..]);
-        var tmp_offset = header.size();
-
-        const id = if (header.is64Bit())
-            mem.readIntLittle(u64, data[offset + tmp_offset ..][0..8])
-        else
-            mem.readIntLittle(u32, data[offset + tmp_offset ..][0..4]);
-        tmp_offset += if (header.is64Bit()) 8 else 4;
-
-        if (id == 0) { // TODO hard-coding for now
-            // CIE
-            const cie = try CommonInformationEntry.parse(header, id, addr_size, data[offset + tmp_offset ..]);
-            try cies.putNoClobber(offset, cie);
-            offset += cie.header.length + cie.header.size();
-        } else {
-            // FDE
-            const fde = try FrameDescriptionEntry.parse(header, id, addr_size, data[offset + tmp_offset ..]);
-            try fdes.append(.{ .fde = fde, .offset = offset });
-            offset += fde.header.length + fde.header.size();
-        }
+    var cies = std.AutoArrayHashMap(u64, CieWithHeader).init(self.gpa);
+    defer {
+        for (cies.keys()) |cie_offset| cies.getPtr(cie_offset).?.deinit(self.gpa);
+        cies.deinit();
     }
 
-    try writer.writeAll("__TEXT,__eh_frame contents:\n");
+    var stream = std.io.fixedBufferStream(section.data);
+    while (stream.pos < stream.buffer.len) {
+        const entry_header = try dwarf.EntryHeader.read(&stream, section.frame_type, write_options.endian);
+        switch (entry_header.type) {
+            .cie => {
+                const cie = try dwarf.CommonInformationEntry.parse(
+                    entry_header.entry_bytes,
+                    @as(i64, @intCast(section.offset)) - @as(i64, @intCast(@intFromPtr(section.data.ptr))),
+                    false,
+                    entry_header.is_64,
+                    section.frame_type,
+                    entry_header.length_offset,
+                    write_options.addr_size,
+                    write_options.endian,
+                );
 
-    for (cies.keys()) |cie_offset| {
-        const cie = cies.get(cie_offset).?;
+                const entry = try cies.getOrPut(entry_header.length_offset);
+                assert(!entry.found_existing);
+                entry.value_ptr.* = .{ .cie = cie, .header = entry_header };
 
-        try writer.writeAll("\nCIE:\n");
-        try writer.print("  {s: <30}: {d}\n", .{ "Length", cie.header.length });
-        try writer.print("  {s: <30}: {d}\n", .{ "Id", cie.id });
-        try writer.print("  {s: <30}: {d}\n", .{ "Version", cie.version });
-        try writer.print("  {s: <30}: {s}\n", .{ "Augmentation", cie.augmentation_str });
-        try writer.print("  {s: <30}: {d}\n", .{ "Code Alignment Factor", cie.code_alignment_factor });
-        try writer.print("  {s: <30}: {d}\n", .{ "Data Alignment Factor", cie.data_alignment_factor });
-        try writer.print("  {s: <30}: {d}\n", .{ "Return Address Register", cie.return_address_register });
-        try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", cie.augmentation_data.len });
-        try writer.print("  {s: <30}: 0x{x}\n", .{ "FDE Pointer Encoding", cie.fde_pointer_encoding });
-        try writer.print("  {s: <30}: 0x{x}\n", .{ "LSDA Pointer Encoding", cie.lsda_pointer_encoding });
+                try self.writeCie(writer, write_options, entry.value_ptr);
+            },
+            .fde => |cie_offset| {
+                const cie_with_header = cies.getPtr(cie_offset) orelse return error.InvalidFDE;
+                const fde = try dwarf.FrameDescriptionEntry.parse(
+                    entry_header.entry_bytes,
+                    @as(i64, @intCast(section.offset)) - @as(i64, @intCast(@intFromPtr(section.data.ptr))),
+                    false,
+                    cie_with_header.cie,
+                    write_options.addr_size,
+                    write_options.endian,
+                );
 
-        if (cie.personality) |_| {
-            try writer.print("  {s: <30}: 0x{x}\n", .{ "Personality", cie.personality.? });
-            try writer.print("  {s: <30}: 0x{x}\n", .{ "Personality Encoding", cie.personality_encoding.? });
-        }
-
-        try writer.print("  {s: <30}: 0x{x}\n", .{ "Augmentation Data", std.fmt.fmtSliceHexLower(cie.augmentation_data) });
-        try writer.print("  {s: <30}: 0x{x}\n", .{
-            "Initial Instructions",
-            std.fmt.fmtSliceHexLower(cie.initial_instructions),
-        });
-
-        for (fdes.items) |fde_with_offset| {
-            const fde = fde_with_offset.fde;
-            if (fde_with_offset.offset + fde.header.size() - fde.cie_pointer != cie_offset) continue;
-
-            try writer.writeAll("\nFDE:\n");
-            try writer.print("  {s: <30}: {d}\n", .{ "Length", fde.header.length });
-            try writer.print("  {s: <30}: 0x{x}\n", .{ "CIE Pointer", fde.cie_pointer });
-            try writer.print("  {s: <30}: 0x{x}\n", .{ "PC Begin", fde.pc_begin });
-            try writer.print("  {s: <30}: {d}\n", .{ "PC Range", fde.pc_range });
-            try writer.print("  {s: <30}: {d}\n", .{ "Augmentation Length", fde.augmentation_data.len });
-            try writer.print("  {s: <30}: 0x{x}\n", .{ "Instructions", std.fmt.fmtSliceHexLower(fde.instructions) });
+                try self.writeFde(writer, write_options, cie_with_header, entry_header, fde);
+            },
+            .terminator => {
+                try writer.print("{x:0>8} ZERO terminator\n", .{entry_header.length_offset});
+                break;
+            },
         }
     }
 }
 
-const CommonInformationEntry = struct {
-    header: DwarfHeader,
-    id: u64,
-    version: u8,
-    augmentation_str: []const u8,
-    code_alignment_factor: u64,
-    data_alignment_factor: i64,
-    return_address_register: u64,
-    augmentation_data: []const u8,
-    fde_pointer_encoding: u32,
-    lsda_pointer_encoding: u32,
-    personality: ?u64,
-    personality_encoding: ?u8,
-    initial_instructions: []const u8,
+fn headerFormat(is_64: bool) []const u8 {
+    return if (is_64) "{x:0>16}" else "{x:0>8}";
+}
 
-    fn parse(header: DwarfHeader, id: u64, addr_size: u8, buffer: []const u8) !CommonInformationEntry {
-        var stream = std.io.fixedBufferStream(buffer);
-        var creader = std.io.countingReader(stream.reader());
-        const reader = creader.reader();
-
-        const version = try reader.readByte();
-        const augmentation_str = blk: {
-            const augmentation = mem.sliceTo(@ptrCast([*:0]const u8, buffer.ptr + creader.bytes_read), 0);
-            stream.pos += augmentation.len + 1;
-            creader.bytes_read += augmentation.len + 1;
-            break :blk augmentation;
-        };
-
-        const code_alignment_factor = try leb.readULEB128(u64, reader);
-        const data_alignment_factor = try leb.readILEB128(i64, reader);
-        const return_address_register = try leb.readULEB128(u64, reader);
-
-        var augmentation_start: usize = 0;
-        var augmentation_length: usize = 0;
-        var augmentation_data: []const u8 = &[0]u8{};
-        var fde_pointer_encoding: u32 = 0;
-        var lsda_pointer_encoding: u32 = 0;
-        var personality: ?u64 = null;
-        var personality_encoding: ?u8 = null;
-
-        for (augmentation_str, 0..) |ch, i| switch (ch) {
-            'z' => if (i > 0) {
-                return error.MalformedAugmentationString;
-            } else {
-                augmentation_length = try leb.readULEB128(u64, reader);
-                augmentation_start = creader.bytes_read;
-            },
-            'R' => {
-                fde_pointer_encoding = try reader.readByte();
-            },
-            'P' => {
-                personality_encoding = try reader.readByte();
-                personality = try getEncodedPointer(personality_encoding.?, addr_size, 0, reader); // TODO resolve relocs
-            },
-            'L' => {
-                lsda_pointer_encoding = try reader.readByte();
-            },
-            'S', 'B', 'G' => {},
-            else => return error.UnknownAugmentationStringValue,
-        };
-
-        if (augmentation_length > 0) {
-            augmentation_data = buffer[augmentation_start..][0..augmentation_length];
-        }
-
-        const nread = creader.bytes_read + header.size() + (if (header.is64Bit()) @as(u64, 8) else 4);
-        const initial_instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - nread];
-
-        return CommonInformationEntry{
-            .header = header,
-            .id = id,
-            .version = version,
-            .augmentation_str = augmentation_str,
-            .code_alignment_factor = code_alignment_factor,
-            .data_alignment_factor = data_alignment_factor,
-            .return_address_register = return_address_register,
-            .augmentation_data = augmentation_data,
-            .fde_pointer_encoding = fde_pointer_encoding,
-            .lsda_pointer_encoding = lsda_pointer_encoding,
-            .personality = personality,
-            .personality_encoding = personality_encoding,
-            .initial_instructions = initial_instructions,
-        };
-    }
-};
-
-const FrameDescriptionEntry = struct {
-    header: DwarfHeader,
-    cie_pointer: u64,
-    pc_begin: u64,
-    pc_range: u64,
-    augmentation_data: []const u8,
-    instructions: []const u8,
-
-    fn parse(header: DwarfHeader, cie_pointer: u64, addr_size: u16, buffer: []const u8) !FrameDescriptionEntry {
-        var stream = std.io.fixedBufferStream(buffer);
-        var creader = std.io.countingReader(stream.reader());
-        const reader = creader.reader();
-
-        const pc_begin = if (addr_size == 8) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
-        const pc_range = if (addr_size == 8) try reader.readIntLittle(u64) else try reader.readIntLittle(u32);
-
-        const augmentation_length = try leb.readULEB128(u64, reader);
-        const augmentation_data = buffer[creader.bytes_read..][0..augmentation_length];
-        creader.bytes_read += augmentation_length;
-        stream.pos += augmentation_length;
-
-        const nread = creader.bytes_read + header.size() + (if (header.is64Bit()) @as(u64, 8) else 4);
-        const instructions = buffer[creader.bytes_read..][0 .. header.length + header.size() - nread];
-
-        return FrameDescriptionEntry{
-            .header = header,
-            .cie_pointer = cie_pointer,
-            .pc_begin = pc_begin,
-            .pc_range = pc_range,
-            .augmentation_data = augmentation_data,
-            .instructions = instructions,
-        };
-    }
-};
-
-const EH_PE = struct {
-    const absptr = 0x00;
-    const uleb128 = 0x01;
-    const udata2 = 0x02;
-    const udata4 = 0x03;
-    const udata8 = 0x04;
-    const sleb128 = 0x09;
-    const sdata2 = 0x0A;
-    const sdata4 = 0x0B;
-    const sdata8 = 0x0C;
-    const pcrel = 0x10;
-    const textrel = 0x20;
-    const datarel = 0x30;
-    const funcrel = 0x40;
-    const aligned = 0x50;
-    const indirect = 0x80;
-    const omit = 0xFF;
-};
-
-fn getEncodedPointer(enc: u8, addr_size: u8, pcrel_offset: i64, reader: anytype) !?u64 {
-    if (enc == EH_PE.omit) return null;
-
-    var ptr: i64 = switch (enc & 0x0F) {
-        EH_PE.absptr => switch (addr_size) {
-            2 => @bitCast(i16, try reader.readIntLittle(u16)),
-            4 => @bitCast(i32, try reader.readIntLittle(u32)),
-            8 => @bitCast(i64, try reader.readIntLittle(u64)),
-            else => return null,
-        },
-        EH_PE.udata2 => @bitCast(i16, try reader.readIntLittle(u16)),
-        EH_PE.udata4 => @bitCast(i32, try reader.readIntLittle(u32)),
-        EH_PE.udata8 => @bitCast(i64, try reader.readIntLittle(u64)),
-        EH_PE.uleb128 => @bitCast(i64, try leb.readULEB128(u64, reader)),
-        EH_PE.sdata2 => try reader.readIntLittle(i16),
-        EH_PE.sdata4 => try reader.readIntLittle(i32),
-        EH_PE.sdata8 => try reader.readIntLittle(i64),
-        EH_PE.sleb128 => try leb.readILEB128(i64, reader),
-        else => return null,
+fn writeCie(
+    self: DwarfDump,
+    writer: anytype,
+    options: WriteOptions,
+    cie_with_header: *CieWithHeader,
+) !void {
+    const expression_context = dwarf.expressions.ExpressionContext{
+        .is_64 = cie_with_header.header.is_64,
     };
 
-    switch (enc & 0x70) {
-        EH_PE.absptr => {},
-        EH_PE.pcrel => ptr += pcrel_offset,
-        EH_PE.datarel,
-        EH_PE.textrel,
-        EH_PE.funcrel,
-        EH_PE.aligned,
-        => return null,
-        else => return null,
+    switch (cie_with_header.header.is_64) {
+        inline else => |is_64| {
+            const length_fmt = comptime headerFormat(is_64);
+            try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " CIE\n", .{
+                cie_with_header.cie.length_offset,
+                cie_with_header.header.entryLength(),
+                @as(u64, switch (options.frame_type) {
+                    .eh_frame => dwarf.CommonInformationEntry.eh_id,
+                    .debug_frame => if (is_64) dwarf.CommonInformationEntry.dwarf64_id else dwarf.CommonInformationEntry.dwarf32_id,
+                    else => unreachable,
+                }),
+            });
+        },
     }
 
-    return @bitCast(u64, ptr);
+    const cie = &cie_with_header.cie;
+    try writeFormat(writer, cie_with_header.header.is_64, true);
+    try writer.print("  {s: <23}{}\n", .{ "Version:", cie.version });
+    try writer.print("  {s: <23}\"{s}\"\n", .{ "Augmentation:", cie.aug_str });
+    if (cie_with_header.cie.version == 4) {
+        try writer.print("  {s: <23}{}\n", .{ "Address size:", cie.address_size });
+        try writer.print("  {s: <23}{}\n", .{ "Segment desc size:", cie.segment_selector_size.? });
+    }
+    try writer.print("  {s: <23}{}\n", .{ "Code alignment factor:", cie.code_alignment_factor });
+    try writer.print("  {s: <23}{}\n", .{ "Data alignment factor:", cie.data_alignment_factor });
+    try writer.print("  {s: <23}{}\n", .{ "Return address column:", cie.return_address_register });
+
+    // Oddly llvm-dwarfdump does not align this field with the rest
+    if (cie.personality_routine_pointer) |p| try writer.print("  {s: <21}{x:0>16}\n", .{ "Personality Address:", p });
+
+    if (cie.aug_data.len > 0) {
+        try writer.print("  {s: <22}", .{"Augmentation data:"});
+        for (cie.aug_data) |byte| {
+            try writer.print(" {X:0>2}", .{byte});
+        }
+        try writer.writeByte('\n');
+    }
+
+    if (!options.llvm_compatibility) {
+        try writer.writeAll("\n");
+        if (cie.personality_enc) |p| try writer.print("  {s: <23}{X}\n", .{ "Personality Pointer Encoding:", p });
+        try writer.print("  {s: <23}{X}\n", .{ "LSDA Pointer Encoding:", cie.lsda_pointer_enc });
+        try writer.print("  {s: <23}{X}\n", .{ "FDE Pointer Encoding:", cie.fde_pointer_enc });
+    }
+
+    try writer.writeAll("\n");
+
+    {
+        var instruction_stream = std.io.fixedBufferStream(cie.initial_instructions);
+        while (instruction_stream.pos < instruction_stream.buffer.len) {
+            const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
+            const opcode = std.meta.activeTag(instruction);
+            try writer.print("  DW_CFA_{s}:", .{@tagName(opcode)});
+            try writeOperands(
+                instruction,
+                writer,
+                cie.*,
+                self.ctx.getArch(),
+                expression_context,
+                options.reg_ctx,
+                options.addr_size,
+                options.endian,
+            );
+            _ = try cie_with_header.vm.step(self.gpa, cie.*, true, instruction);
+            try writer.writeByte('\n');
+        }
+    }
+
+    try writer.writeAll("\n");
+    if (cie_with_header.vm.current_row.cfa.rule != .default) try writer.writeAll("  ");
+    try self.writeRow(
+        writer,
+        cie_with_header.vm,
+        cie_with_header.vm.current_row,
+        expression_context,
+        options.reg_ctx,
+        options.addr_size,
+        options.endian,
+    );
+    try writer.writeByte('\n');
+
+    cie_with_header.vm_snapshot_columns = cie_with_header.vm.columns.items.len;
+    cie_with_header.vm_snapshot_row = cie_with_header.vm.current_row;
+}
+
+fn writeFde(
+    self: DwarfDump,
+    writer: anytype,
+    options: WriteOptions,
+    cie_with_header: *CieWithHeader,
+    header: dwarf.EntryHeader,
+    fde: dwarf.FrameDescriptionEntry,
+) !void {
+    const cie = &cie_with_header.cie;
+    const expression_context = dwarf.expressions.ExpressionContext{
+        .is_64 = cie.is_64,
+    };
+
+    // TODO: Print <invalid offset> for cie if it didn't point to an actual CIE
+    switch (cie_with_header.header.is_64) {
+        inline else => |is_64| {
+            const length_fmt = comptime headerFormat(is_64);
+            try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " FDE cie={x:0>8} pc={x:0>8}...{x:0>8}\n", .{
+                header.length_offset,
+                header.entryLength(),
+                switch (options.frame_type) {
+                    .eh_frame => (header.length_offset + @as(u8, if (header.is_64) 12 else 4)) - fde.cie_length_offset,
+                    .debug_frame => fde.cie_length_offset,
+                    else => unreachable,
+                },
+                fde.cie_length_offset,
+                fde.pc_begin,
+                fde.pc_begin + fde.pc_range,
+            });
+        },
+    }
+
+    try writeFormat(writer, cie_with_header.header.is_64, false);
+    if (fde.lsda_pointer) |p| try writer.print("  LSDA Address: {x:0>16}\n", .{p});
+
+    if (!options.llvm_compatibility) {
+        if (fde.aug_data.len > 0) try writer.print("  {s: <23}{}\n", .{ "Augmentation data:", std.fmt.fmtSliceHexUpper(cie.aug_data) });
+    }
+
+    var instruction_stream = std.io.fixedBufferStream(fde.instructions);
+
+    // First pass to print instructions and their operands
+    while (instruction_stream.pos < instruction_stream.buffer.len) {
+        const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
+        const opcode = std.meta.activeTag(instruction);
+        try writer.print("  DW_CFA_{s}:", .{@tagName(opcode)});
+        try writeOperands(
+            instruction,
+            writer,
+            cie.*,
+            self.ctx.getArch(),
+            expression_context,
+            options.reg_ctx,
+            options.addr_size,
+            options.endian,
+        );
+        try writer.writeByte('\n');
+    }
+
+    try writer.writeByte('\n');
+
+    // Second pass to run them and print the generated table
+    instruction_stream.pos = 0;
+    while (instruction_stream.pos < instruction_stream.buffer.len) {
+        const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
+        var prev_row = try cie_with_header.vm.step(self.gpa, cie.*, false, instruction);
+        if (cie_with_header.vm.current_row.offset != prev_row.offset) {
+            try writer.print("  0x{x}: ", .{fde.pc_begin + prev_row.offset});
+            try self.writeRow(
+                writer,
+                cie_with_header.vm,
+                prev_row,
+                expression_context,
+                options.reg_ctx,
+                options.addr_size,
+                options.endian,
+            );
+        }
+    }
+
+    try writer.print("  0x{x}: ", .{fde.pc_begin + cie_with_header.vm.current_row.offset});
+    try self.writeRow(
+        writer,
+        cie_with_header.vm,
+        cie_with_header.vm.current_row,
+        expression_context,
+        options.reg_ctx,
+        options.addr_size,
+        options.endian,
+    );
+
+    // Restore the VM state to the result of the initial CIE instructions
+    cie_with_header.vm.columns.items.len = cie_with_header.vm_snapshot_columns;
+    cie_with_header.vm.current_row = cie_with_header.vm_snapshot_row;
+    cie_with_header.vm.cie_row = null;
+
+    try writer.writeByte('\n');
+}
+
+fn writeRow(
+    self: DwarfDump,
+    writer: anytype,
+    vm: VirtualMachine,
+    row: VirtualMachine.Row,
+    expression_context: dwarf.expressions.ExpressionContext,
+    reg_ctx: abi.RegisterContext,
+    addr_size: u8,
+    endian: std.builtin.Endian,
+) !void {
+    const columns = vm.rowColumns(row);
+
+    var wrote_anything = false;
+    var wrote_separator = false;
+    if (try writeColumnRule(
+        row.cfa,
+        writer,
+        true,
+        self.ctx.getArch(),
+        expression_context,
+        reg_ctx,
+        addr_size,
+        endian,
+    )) {
+        wrote_anything = true;
+    }
+
+    // llvm-dwarfdump prints columns sorted by register number
+    var num_printed: usize = 0;
+    for (0..256) |register| {
+        for (columns) |column| {
+            if (column.register == @as(u8, @intCast(register))) {
+                if (column.rule != .default and !wrote_separator) {
+                    try writer.writeAll(": ");
+                    wrote_separator = true;
+                }
+
+                if (try writeColumnRule(
+                    column,
+                    writer,
+                    false,
+                    self.ctx.getArch(),
+                    expression_context,
+                    reg_ctx,
+                    addr_size,
+                    endian,
+                )) {
+                    if (num_printed != columns.len - 1) {
+                        try writer.writeAll(", ");
+                    }
+                    wrote_anything = true;
+                }
+
+                num_printed += 1;
+            }
+        }
+
+        if (num_printed == columns.len) break;
+    }
+
+    if (wrote_anything) try writer.writeByte('\n');
+}
+
+pub fn writeColumnRule(
+    column: VirtualMachine.Column,
+    writer: anytype,
+    is_cfa: bool,
+    arch: ?std.Target.Cpu.Arch,
+    expression_context: dwarf.expressions.ExpressionContext,
+    reg_ctx: abi.RegisterContext,
+    addr_size_bytes: u8,
+    endian: std.builtin.Endian,
+) !bool {
+    if (column.rule == .default) return false;
+
+    if (is_cfa) {
+        try writer.writeAll("CFA");
+    } else {
+        try writeRegisterName(writer, arch, column.register.?, reg_ctx);
+    }
+
+    try writer.writeByte('=');
+    switch (column.rule) {
+        .default => {},
+        .undefined => try writer.writeAll("undefined"),
+        .same_value => try writer.writeAll("S"),
+        .offset, .val_offset => |offset| {
+            if (offset == 0) {
+                if (is_cfa) {
+                    if (column.register) |cfa_register| {
+                        try writer.print("{}", .{fmtRegister(cfa_register, reg_ctx, arch)});
+                    } else {
+                        try writer.writeAll("undefined");
+                    }
+                } else {
+                    try writer.writeAll("[CFA]");
+                }
+            } else {
+                if (is_cfa) {
+                    if (column.register) |cfa_register| {
+                        try writer.print("{}{d:<1}", .{ fmtRegister(cfa_register, reg_ctx, arch), offset });
+                    } else {
+                        try writer.print("undefined{d:<1}", .{offset});
+                    }
+                } else {
+                    try writer.print("[CFA{d:<1}]", .{offset});
+                }
+            }
+        },
+        .register => |register| try writeRegisterName(writer, arch, register, reg_ctx),
+        .expression => |expression| {
+            if (!is_cfa) try writer.writeByte('[');
+            try writeExpression(writer, expression, arch, expression_context, reg_ctx, addr_size_bytes, endian);
+            if (!is_cfa) try writer.writeByte(']');
+        },
+        .val_expression => try writer.writeAll("TODO(val_expression)"),
+        .architectural => try writer.writeAll("TODO(architectural)"),
+    }
+
+    return true;
+}
+
+fn writeExpression(
+    writer: anytype,
+    block: []const u8,
+    arch: ?std.Target.Cpu.Arch,
+    expression_context: dwarf.expressions.ExpressionContext,
+    reg_ctx: abi.RegisterContext,
+    addr_size_bytes: u8,
+    endian: std.builtin.Endian,
+) !void {
+    var stream = std.io.fixedBufferStream(block);
+
+    // Generate a lookup table from opcode value to name
+    const opcode_lut_len = 256;
+    const opcode_lut: [opcode_lut_len]?[]const u8 = comptime blk: {
+        var lut: [opcode_lut_len]?[]const u8 = [_]?[]const u8{null} ** opcode_lut_len;
+        for (@typeInfo(dwarf.OP).Struct.decls) |decl| {
+            lut[@as(u8, @field(dwarf.OP, decl.name))] = decl.name;
+        }
+
+        break :blk lut;
+    };
+
+    switch (endian) {
+        inline .Little, .Big => |e| {
+            switch (addr_size_bytes) {
+                inline 2, 4, 8 => |size| {
+                    const StackMachine = dwarf.expressions.StackMachine(.{
+                        .addr_size = size,
+                        .endian = e,
+                        .call_frame_context = true,
+                    });
+
+                    const reader = stream.reader();
+                    while (stream.pos < stream.buffer.len) {
+                        if (stream.pos > 0) try writer.writeAll(", ");
+
+                        const opcode = try reader.readByte();
+                        if (opcode_lut[opcode]) |opcode_name| {
+                            try writer.print("DW_OP_{s}", .{opcode_name});
+                        } else {
+                            // TODO: See how llvm-dwarfdump prints these?
+                            if (opcode >= dwarf.OP.lo_user and opcode <= dwarf.OP.hi_user) {
+                                try writer.print("<unknown vendor opcode: 0x{x}>", .{opcode});
+                            } else {
+                                try writer.print("<invalid opcode: 0x{x}>", .{opcode});
+                            }
+                        }
+
+                        if (try StackMachine.readOperand(&stream, opcode, expression_context)) |value| {
+                            switch (value) {
+                                .generic => {}, // Constant values are implied by the opcode name
+                                .register => |v| try writer.print(" {}", .{fmtRegister(v, reg_ctx, arch)}),
+                                .base_register => |v| try writer.print(" {}{d:<1}", .{ fmtRegister(v.base_register, reg_ctx, arch), v.offset }),
+                                else => try writer.print(" TODO({s})", .{@tagName(value)}),
+                            }
+                        }
+                    }
+                },
+                else => return error.InvalidAddrSize,
+            }
+        },
+    }
+}
+
+fn writeOperands(
+    instruction: dwarf.call_frame.Instruction,
+    writer: anytype,
+    cie: dwarf.CommonInformationEntry,
+    arch: ?std.Target.Cpu.Arch,
+    expression_context: dwarf.expressions.ExpressionContext,
+    reg_ctx: abi.RegisterContext,
+    addr_size_bytes: u8,
+    endian: std.builtin.Endian,
+) !void {
+    switch (instruction) {
+        .set_loc => |i| try writer.print(" 0x{x}", .{i.address}),
+        inline .advance_loc,
+        .advance_loc1,
+        .advance_loc2,
+        .advance_loc4,
+        => |i| try writer.print(" {}", .{i.delta * cie.code_alignment_factor}),
+        inline .offset,
+        .offset_extended,
+        .offset_extended_sf,
+        => |i| try writer.print(" {} {d}", .{
+            fmtRegister(i.register, reg_ctx, arch),
+            @as(i64, @intCast(i.offset)) * cie.data_alignment_factor,
+        }),
+        inline .restore,
+        .restore_extended,
+        .undefined,
+        .same_value,
+        => |i| try writer.print(" {}", .{fmtRegister(i.register, reg_ctx, arch)}),
+        .nop => {},
+        .register => |i| try writer.print(" {} {}", .{ fmtRegister(i.register, reg_ctx, arch), fmtRegister(i.target_register, reg_ctx, arch) }),
+        .remember_state => {},
+        .restore_state => {},
+        .def_cfa => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.register, reg_ctx, arch), @as(i64, @intCast(i.offset)) }),
+        .def_cfa_sf => |i| try writer.print(" {} {d:<1}", .{ fmtRegister(i.register, reg_ctx, arch), i.offset * cie.data_alignment_factor }),
+        .def_cfa_register => |i| try writer.print(" {}", .{fmtRegister(i.register, reg_ctx, arch)}),
+        .def_cfa_offset => |i| try writer.print(" {d:<1}", .{@as(i64, @intCast(i.offset))}),
+        .def_cfa_offset_sf => |i| try writer.print(" {d:<1}", .{i.offset * cie.data_alignment_factor}),
+        .def_cfa_expression => |i| {
+            try writer.writeByte(' ');
+            try writeExpression(writer, i.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
+        },
+        .expression => |i| {
+            try writer.print(" {} ", .{fmtRegister(i.register, reg_ctx, arch)});
+            try writeExpression(writer, i.block, arch, expression_context, reg_ctx, addr_size_bytes, endian);
+        },
+        .val_offset => {},
+        .val_offset_sf => {},
+        .val_expression => {},
+    }
+}
+
+fn writeFormat(writer: anytype, is_64: bool, comptime is_cie: bool) !void {
+    try writer.print("  {s: <" ++ (if (is_cie) "23" else "14") ++ "}{s}\n", .{ "Format:", if (is_64) "DWARF64" else "DWARF32" });
+}
+
+fn writeUnknownReg(writer: anytype, reg_number: u8) !void {
+    try writer.print("reg{}", .{reg_number});
+}
+
+pub fn writeRegisterName(
+    writer: anytype,
+    arch: ?std.Target.Cpu.Arch,
+    reg_number: u8,
+    reg_ctx: abi.RegisterContext,
+) !void {
+    if (arch) |a| {
+        switch (a) {
+            .x86 => {
+                switch (reg_number) {
+                    0 => try writer.writeAll("EAX"),
+                    1 => try writer.writeAll("EDX"),
+                    2 => try writer.writeAll("ECX"),
+                    3 => try writer.writeAll("EBX"),
+                    4 => if (reg_ctx.eh_frame and reg_ctx.is_macho) try writer.writeAll("EBP") else try writer.writeAll("ESP"),
+                    5 => if (reg_ctx.eh_frame and reg_ctx.is_macho) try writer.writeAll("ESP") else try writer.writeAll("EBP"),
+                    6 => try writer.writeAll("ESI"),
+                    7 => try writer.writeAll("EDI"),
+                    8 => try writer.writeAll("EIP"),
+                    9 => try writer.writeAll("EFL"),
+                    10 => try writer.writeAll("CS"),
+                    11 => try writer.writeAll("SS"),
+                    12 => try writer.writeAll("DS"),
+                    13 => try writer.writeAll("ES"),
+                    14 => try writer.writeAll("FS"),
+                    15 => try writer.writeAll("GS"),
+                    16...23 => try writer.print("ST{}", .{reg_number - 16}),
+                    32...39 => try writer.print("XMM{}", .{reg_number - 32}),
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            .x86_64 => {
+                switch (reg_number) {
+                    0 => try writer.writeAll("RAX"),
+                    1 => try writer.writeAll("RDX"),
+                    2 => try writer.writeAll("RCX"),
+                    3 => try writer.writeAll("RBX"),
+                    4 => try writer.writeAll("RSI"),
+                    5 => try writer.writeAll("RDI"),
+                    6 => try writer.writeAll("RBP"),
+                    7 => try writer.writeAll("RSP"),
+                    8...15 => try writer.print("R{}", .{reg_number}),
+                    16 => try writer.writeAll("RIP"),
+                    17...32 => try writer.print("XMM{}", .{reg_number - 17}),
+                    33...40 => try writer.print("ST{}", .{reg_number - 33}),
+                    41...48 => try writer.print("MM{}", .{reg_number - 41}),
+                    49 => try writer.writeAll("RFLAGS"),
+                    50 => try writer.writeAll("ES"),
+                    51 => try writer.writeAll("CS"),
+                    52 => try writer.writeAll("SS"),
+                    53 => try writer.writeAll("DS"),
+                    54 => try writer.writeAll("FS"),
+                    55 => try writer.writeAll("GS"),
+                    // 56-57 Reserved
+                    58 => try writer.writeAll("FS.BASE"),
+                    59 => try writer.writeAll("GS.BASE"),
+                    // 60-61 Reserved
+                    62 => try writer.writeAll("TR"),
+                    63 => try writer.writeAll("LDTR"),
+                    64 => try writer.writeAll("MXCSR"),
+                    65 => try writer.writeAll("FCW"),
+                    66 => try writer.writeAll("FSW"),
+                    67...82 => try writer.print("XMM{}", .{reg_number - 51}),
+                    // 83-117 Reserved
+                    118...125 => try writer.print("K{}", .{reg_number - 118}),
+                    // 126-129 Reserved
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            .arm => {
+                switch (reg_number) {
+                    0...15 => try writer.print("R{}", .{reg_number}),
+                    // 16-63 None
+                    64...95 => try writer.print("S{}", .{reg_number - 64}),
+                    96...103 => try writer.print("F{}", .{reg_number - 96}),
+
+                    // Could also be ACC0-ACC7
+                    104...111 => try writer.print("wCGR0{}", .{reg_number - 104}),
+                    112...127 => try writer.print("wR0{}", .{reg_number - 112}),
+                    128 => try writer.writeAll("SPSR"),
+                    129 => try writer.writeAll("SPSR_FIQ"),
+                    130 => try writer.writeAll("SPSR_IRQ"),
+                    131 => try writer.writeAll("SPSR_ABT"),
+                    132 => try writer.writeAll("SPSR_UND"),
+                    133 => try writer.writeAll("SPSR_SVC"),
+                    // 134-142 None
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            .aarch64 => {
+                switch (reg_number) {
+                    0...30 => try writer.print("W{}", .{reg_number}),
+                    31 => try writer.writeAll("WSP"),
+                    32 => try writer.writeAll("PC"),
+                    33 => try writer.writeAll("ELR_mode"),
+                    34 => try writer.writeAll("RA_SIGN_STATE"),
+                    35 => try writer.writeAll("TPIDRRO_ELO"),
+                    36 => try writer.writeAll("TPIDR_ELO"),
+                    37 => try writer.writeAll("TPIDR_EL1"),
+                    38 => try writer.writeAll("TPIDR_EL2"),
+                    39 => try writer.writeAll("TPIDR_EL3"),
+                    // 40-45 Reserved
+                    46 => try writer.writeAll("VG"),
+                    47 => try writer.writeAll("FFR"),
+                    48...63 => try writer.print("P{}", .{reg_number - 48}),
+                    64...95 => try writer.print("B{}", .{reg_number - 64}),
+                    96...127 => try writer.print("Z{}", .{reg_number - 96}),
+                    else => try writeUnknownReg(writer, reg_number),
+                }
+            },
+            else => try writeUnknownReg(writer, reg_number),
+        }
+    } else try writeUnknownReg(writer, reg_number);
+}
+
+const FormatRegisterData = struct {
+    reg_number: u8,
+    reg_ctx: abi.RegisterContext,
+    arch: ?std.Target.Cpu.Arch,
+};
+
+pub fn formatRegister(
+    data: FormatRegisterData,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = fmt;
+    _ = options;
+    try writeRegisterName(writer, data.arch, data.reg_number, data.reg_ctx);
+}
+
+pub fn fmtRegister(
+    reg_number: u8,
+    reg_ctx: abi.RegisterContext,
+    arch: ?std.Target.Cpu.Arch,
+) std.fmt.Formatter(formatRegister) {
+    return .{
+        .data = .{
+            .reg_number = reg_number,
+            .reg_ctx = reg_ctx,
+            .arch = arch,
+        },
+    };
 }
