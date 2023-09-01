@@ -12,12 +12,15 @@ will tell.
 
 ```
 $ zig-dwarfdump --help
-dwarfdump [--help] [--eh-frame] <FILE>
-        --help
-            Display this help and exit.
+Usage: zig-dwarfdump [options] file
 
-        --eh-frame
-            Display .eh_frame section contents.
+General options:
+--debug-info          Display .debug_info section contents (default)
+--eh-frame            Display .eh_frame section contents
+--llvm-compatibility  Output is formatted exactly like llvm-dwarfdump, with no extra information
+--all, -a             Display all debug info sections
+--help                Display this help and exit
+
 ```
 
 ### Example usage (MachO)
@@ -142,9 +145,9 @@ FDE:
 
 ### Building
 
-Remember to clone with submodules, and use latest `zig` master:
+Use latest `zig` master:
 
 ```
-$ git clone https://github.com/kubkon/zig-dwarfdump.git --recursive
+$ git clone https://github.com/kubkon/zig-dwarfdump.git
 $ zig build
 ```

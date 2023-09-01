@@ -10,9 +10,6 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = mode,
     });
-    exe.addAnonymousModule("clap", .{
-        .source_file = .{ .path = "clap/clap.zig" },
-    });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
