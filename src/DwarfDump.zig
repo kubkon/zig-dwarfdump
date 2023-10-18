@@ -324,10 +324,7 @@ const CompileUnitIterator = struct {
         const reader = creader.reader();
 
         const cuh = try CompileUnit.Header.read(reader);
-        const total_length = cuh.header.length + @as(u64, if (cuh.header.is64Bit())
-            @sizeOf(u64)
-        else
-            @sizeOf(u32));
+        const total_length = cuh.header.length + @as(u64, if (cuh.header.is64Bit()) 12 else 4);
 
         const cu = CompileUnit{
             .cuh = cuh,
