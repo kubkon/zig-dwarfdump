@@ -1,7 +1,11 @@
-decls: std.ArrayListUnmanaged(AbbrevDecl) = .{},
+code: u64,
+decls: std.ArrayListUnmanaged(Decl) = .{},
 loc: Loc,
 
 pub fn deinit(table: *AbbrevTable, gpa: Allocator) void {
+    for (table.decls.items) |*decl| {
+        decl.attrs.deinit(gpa);
+    }
     table.decls.deinit(gpa);
 }
 
@@ -13,18 +17,20 @@ pub fn format(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    for (table.decls) |decl| {
-        try writer.print("{}\n", .{decl});
+    try writer.print("[{d}]", .{table.code});
+    for (table.decls.items) |decl| {
+        try writer.print("  {}\n", .{decl});
     }
 }
 
-pub const AbbrevDecl = struct {
-    tag: dwarf.TAG,
-    form: dwarf.FORM,
+pub const Decl = struct {
+    tag: u64,
+    children: bool,
+    attrs: std.ArrayListUnmanaged(Attr) = .{},
     loc: Loc,
 
     pub fn format(
-        decl: AbbrevDecl,
+        decl: Decl,
         comptime unused_fmt_string: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
@@ -37,7 +43,7 @@ pub const AbbrevDecl = struct {
                 else => false,
             },
             else => inline for (@typeInfo(dwarf.TAG).Struct.decls) |x| {
-                if (@field(dwarf.TAG, x.name) == decl.tag) true;
+                if (@field(dwarf.TAG, x.name) == decl.tag) break true;
             } else false,
         };
         if (is_tag_known) {
@@ -57,12 +63,74 @@ pub const AbbrevDecl = struct {
         } else {
             try writer.print("DW_TAG_unknown_{x}", .{decl.tag});
         }
-        try writer.writeByte(' ');
+
+        try writer.print("  DW_CHILDREN_{s}\n", .{if (decl.children) "yes" else "no"});
+
+        const nattrs = decl.attrs.items.len;
+        if (nattrs == 0) return;
+
+        for (decl.attrs.items[0 .. nattrs - 1]) |attr| {
+            try writer.print("{}\n", .{attr});
+        }
+        try writer.print("{}", .{decl.attrs.items[nattrs - 1]});
+    }
+};
+
+pub const Attr = struct {
+    at: u64,
+    form: u64,
+    loc: Loc,
+
+    pub fn format(
+        attr: Attr,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        // TODO handle options
+        try writer.writeAll("        ");
+
+        const is_at_known = switch (attr.at) {
+            dwarf.AT.lo_user...dwarf.AT.hi_user => switch (attr.at) {
+                0x2111, 0x2113, 0x2115, 0x2117, 0x3e02, 0x3fef => true,
+                else => false,
+            },
+            else => inline for (@typeInfo(dwarf.AT).Struct.decls) |x| {
+                if (@field(dwarf.AT, x.name) == attr.at) break true;
+            } else false,
+        };
+        if (is_at_known) {
+            const name = switch (attr.at) {
+                dwarf.AT.lo_user...dwarf.AT.hi_user => switch (attr.at) {
+                    0x2111 => "DW_AT_GNU_call_site_value",
+                    0x2113 => "DW_AT_GNU_call_site_target",
+                    0x2115 => "DW_AT_GNU_tail_cail",
+                    0x2117 => "DW_AT_GNU_all_call_sites",
+                    0x3e02 => "DW_AT_LLVM_sysroot",
+                    0x3fef => "DW_AT_APPLE_sdk",
+                    else => unreachable,
+                },
+                else => inline for (@typeInfo(dwarf.AT).Struct.decls) |x| {
+                    if (@field(dwarf.AT, x.name) == attr.at) {
+                        break "DW_AT_" ++ x.name;
+                    }
+                } else unreachable,
+            };
+            try writer.print("{s}", .{name});
+        } else {
+            try writer.print("DW_AT_unknown_{x}", .{attr.at});
+        }
+
+        try writer.writeAll("  ");
+
         inline for (@typeInfo(dwarf.FORM).Struct.decls) |x| {
-            if (@field(dwarf.FORM, x.name) == decl.form) {
-                try writer.print("{s}", .{x.name});
+            if (@field(dwarf.FORM, x.name) == attr.form) {
+                try writer.print("DW_FORM_{s}", .{x.name});
+                break;
             }
-        } else try writer.print("DW_FORM_unknown_{x}", .{decl.form});
+        } else try writer.print("DW_FORM_unknown_{x}", .{attr.form});
     }
 };
 

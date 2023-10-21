@@ -2,7 +2,7 @@ gpa: Allocator,
 ctx: *Context,
 abbrev_tables: std.ArrayListUnmanaged(AbbrevTable) = .{},
 
-pub fn deinit(self: DwarfDump) void {
+pub fn deinit(self: *DwarfDump) void {
     self.ctx.destroy(self.gpa);
     for (self.abbrev_tables.items) |*table| {
         table.deinit(self.gpa);
@@ -28,7 +28,56 @@ pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
 }
 
 fn parseAbbrevTables(self: *DwarfDump) !void {
-    _ = self;
+    const debug_abbrev = self.ctx.getDebugAbbrevData() orelse return;
+    var stream = std.io.fixedBufferStream(debug_abbrev);
+    var creader = std.io.countingReader(stream.reader());
+    const reader = creader.reader();
+
+    while (true) {
+        const table = try self.abbrev_tables.addOne(self.gpa);
+        table.* = .{
+            .code = undefined,
+            .loc = .{ .pos = creader.bytes_read, .len = 1 },
+        };
+
+        table.code = try leb.readULEB128(u64, reader);
+
+        if (table.code == 0) break;
+
+        const decl = try table.decls.addOne(self.gpa);
+        decl.* = .{
+            .tag = undefined,
+            .children = undefined,
+            .loc = .{ .pos = creader.bytes_read, .len = 0 },
+        };
+
+        decl.tag = try leb.readULEB128(u64, reader);
+        decl.children = (try reader.readByte()) > 0;
+
+        while (true) {
+            const attr = try decl.attrs.addOne(self.gpa);
+            attr.* = .{
+                .at = undefined,
+                .form = undefined,
+                .loc = .{ .pos = creader.bytes_read, .len = 0 },
+            };
+            attr.at = try leb.readULEB128(u64, reader);
+            attr.form = try leb.readULEB128(u64, reader);
+            attr.loc.len = creader.bytes_read - attr.loc.pos;
+
+            if (attr.at == 0 and attr.form == 0) break;
+        }
+
+        decl.loc.len = creader.bytes_read - decl.loc.pos;
+        table.loc.len = creader.bytes_read - table.loc.pos;
+    }
+}
+
+pub fn printAbbrevTables(self: DwarfDump, writer: anytype) !void {
+    try writer.writeAll(".debug_abbrev contents:\n");
+    for (self.abbrev_tables.items) |table| {
+        try writer.print("{}\n", .{table});
+    }
 }
 
 pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
