@@ -1,24 +1,13 @@
-const DwarfDump = @This();
-
-const std = @import("std");
-const assert = std.debug.assert;
-const dwarf = std.dwarf;
-const abi = dwarf.abi;
-const leb = std.leb;
-const log = std.log;
-const fs = std.fs;
-const mem = std.mem;
-
-const Allocator = mem.Allocator;
-const AbbrevLookupTable = std.AutoHashMap(u64, struct { pos: usize, len: usize });
-const Context = @import("Context.zig");
-const VirtualMachine = dwarf.call_frame.VirtualMachine;
-
 gpa: Allocator,
 ctx: *Context,
+abbrev_tables: std.ArrayListUnmanaged(AbbrevTable) = .{},
 
 pub fn deinit(self: DwarfDump) void {
     self.ctx.destroy(self.gpa);
+    for (self.abbrev_tables.items) |*table| {
+        table.deinit(self.gpa);
+    }
+    self.abbrev_tables.deinit(self.gpa);
 }
 
 pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
@@ -33,7 +22,13 @@ pub fn parse(gpa: Allocator, file: fs.File) !DwarfDump {
 
     self.ctx = try Context.parse(gpa, data);
 
+    try self.parseAbbrevTables();
+
     return self;
+}
+
+fn parseAbbrevTables(self: *DwarfDump) !void {
+    _ = self;
 }
 
 pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
@@ -69,6 +64,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
         const max_indent: usize = 20; // TODO: this needs reworking
 
         var abbrev_it = cu.value.getAbbrevEntryIterator(self.ctx);
+        var count: usize = 0;
         while (try abbrev_it.next(lookup)) |entry| {
             if (entry.value.tag == 0) {
                 try writer.print("0x{x:0>16}: ", .{entry.off});
@@ -78,6 +74,7 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                 if (children == 0) break;
                 continue;
             }
+            count += 1;
 
             var buffer: [256]u8 = undefined;
 
@@ -230,6 +227,8 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
                 children += 1;
             }
         }
+
+        std.debug.print("count = {d}\n", .{count});
     }
 }
 
@@ -1595,3 +1594,25 @@ pub fn fmtRegister(
         },
     };
 }
+
+pub const Loc = struct {
+    pos: usize,
+    len: usize,
+};
+
+const DwarfDump = @This();
+
+const std = @import("std");
+const assert = std.debug.assert;
+const dwarf = std.dwarf;
+const abi = dwarf.abi;
+const leb = std.leb;
+const log = std.log;
+const fs = std.fs;
+const mem = std.mem;
+
+const Allocator = mem.Allocator;
+const AbbrevLookupTable = std.AutoHashMap(u64, struct { pos: usize, len: usize });
+const AbbrevTable = @import("AbbrevTable.zig");
+const Context = @import("Context.zig");
+const VirtualMachine = dwarf.call_frame.VirtualMachine;
