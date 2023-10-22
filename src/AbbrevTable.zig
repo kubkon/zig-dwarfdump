@@ -1,12 +1,18 @@
-code: u64,
 decls: std.ArrayListUnmanaged(Decl) = .{},
 loc: Loc,
 
 pub fn deinit(table: *AbbrevTable, gpa: Allocator) void {
     for (table.decls.items) |*decl| {
-        decl.attrs.deinit(gpa);
+        decl.deinit(gpa);
     }
     table.decls.deinit(gpa);
+}
+
+pub fn getDecl(table: AbbrevTable, code: u64) ?Decl {
+    for (table.decls.items) |decl| {
+        if (decl.code == code) return decl;
+    }
+    return null;
 }
 
 pub fn format(
@@ -17,17 +23,25 @@ pub fn format(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
-    try writer.print("[{d}]", .{table.code});
     for (table.decls.items) |decl| {
-        try writer.print("  {}\n", .{decl});
+        try writer.print("{}\n", .{decl});
     }
 }
 
 pub const Decl = struct {
+    code: u64,
     tag: u64,
     children: bool,
     attrs: std.ArrayListUnmanaged(Attr) = .{},
     loc: Loc,
+
+    pub fn deinit(decl: *Decl, gpa: Allocator) void {
+        decl.attrs.deinit(gpa);
+    }
+
+    pub fn isNull(decl: Decl) bool {
+        return decl.code == 0;
+    }
 
     pub fn format(
         decl: Decl,
@@ -37,33 +51,11 @@ pub const Decl = struct {
     ) !void {
         _ = unused_fmt_string;
         _ = options;
-        const is_tag_known = switch (decl.tag) {
-            dwarf.TAG.lo_user...dwarf.TAG.hi_user => switch (decl.tag) {
-                0x4109, 0x410a => true,
-                else => false,
-            },
-            else => inline for (@typeInfo(dwarf.TAG).Struct.decls) |x| {
-                if (@field(dwarf.TAG, x.name) == decl.tag) break true;
-            } else false,
-        };
-        if (is_tag_known) {
-            const tag = switch (decl.tag) {
-                dwarf.TAG.lo_user...dwarf.TAG.hi_user => switch (decl.tag) {
-                    0x4109 => "DW_TAG_GNU_call_site",
-                    0x410a => "DW_TAG_GNU_call_site_parameter",
-                    else => unreachable, // sync'd with is_tag_known check above
-                },
-                else => inline for (@typeInfo(dwarf.TAG).Struct.decls) |x| {
-                    if (@field(dwarf.TAG, x.name) == decl.tag) {
-                        break "DW_TAG_" ++ x.name;
-                    }
-                } else unreachable, // sync'd with is_tag_known check above
-            };
-            try writer.print("{s}", .{tag});
-        } else {
-            try writer.print("DW_TAG_unknown_{x}", .{decl.tag});
-        }
 
+        try writer.print("[{d}]  ", .{decl.code});
+        if (decl.isNull()) return;
+
+        try writer.print("{}", .{fmtTag(decl.tag)});
         try writer.print("  DW_CHILDREN_{s}\n", .{if (decl.children) "yes" else "no"});
 
         const nattrs = decl.attrs.items.len;
@@ -76,10 +68,54 @@ pub const Decl = struct {
     }
 };
 
+pub fn fmtTag(tag: u64) std.fmt.Formatter(formatTag) {
+    return .{ .data = tag };
+}
+
+fn formatTag(
+    tag: u64,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const is_tag_known = switch (tag) {
+        dwarf.TAG.lo_user...dwarf.TAG.hi_user => switch (tag) {
+            0x4109, 0x410a => true,
+            else => false,
+        },
+        else => inline for (@typeInfo(dwarf.TAG).Struct.decls) |x| {
+            if (@field(dwarf.TAG, x.name) == tag) break true;
+        } else false,
+    };
+    if (is_tag_known) {
+        const tag_s = switch (tag) {
+            dwarf.TAG.lo_user...dwarf.TAG.hi_user => switch (tag) {
+                0x4109 => "DW_TAG_GNU_call_site",
+                0x410a => "DW_TAG_GNU_call_site_parameter",
+                else => unreachable, // sync'd with is_tag_known check above
+            },
+            else => inline for (@typeInfo(dwarf.TAG).Struct.decls) |x| {
+                if (@field(dwarf.TAG, x.name) == tag) {
+                    break "DW_TAG_" ++ x.name;
+                }
+            } else unreachable, // sync'd with is_tag_known check above
+        };
+        try writer.print("{s}", .{tag_s});
+    } else {
+        try writer.print("DW_TAG_unknown_{x}", .{tag});
+    }
+}
+
 pub const Attr = struct {
     at: u64,
     form: u64,
     loc: Loc,
+
+    pub fn isNull(attr: Attr) bool {
+        return attr.at == 0 and attr.form == 0;
+    }
 
     pub fn format(
         attr: Attr,
