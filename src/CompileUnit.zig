@@ -34,13 +34,49 @@ pub fn format(
     options: std.fmt.FormatOptions,
     writer: anytype,
 ) !void {
+    _ = cu;
     _ = unused_fmt_string;
     _ = options;
+    _ = writer;
+    @compileError("do not format CompileUnit directly; use fmtCompileUnit");
+}
+
+pub fn fmtCompileUnit(
+    cu: *CompileUnit,
+    table: AbbrevTable,
+    ctx: *const Context,
+) std.fmt.Formatter(formatCompileUnit) {
+    return .{ .data = .{
+        .cu = cu,
+        .table = table,
+        .ctx = ctx,
+    } };
+}
+
+const FormatCompileUnitCtx = struct {
+    cu: *CompileUnit,
+    table: AbbrevTable,
+    ctx: *const Context,
+};
+
+pub fn formatCompileUnit(
+    ctx: FormatCompileUnitCtx,
+    comptime unused_fmt_string: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = unused_fmt_string;
+    _ = options;
+    const cu = ctx.cu;
     try writer.print("{}: Compile Unit: {} (next unit at {})\n", .{
         cu.header.dw_format.fmtOffset(cu.loc.pos),
         cu.header,
         cu.header.dw_format.fmtOffset(cu.nextCompileUnitOffset()),
     });
+    for (cu.children.items) |die_index| {
+        const die = cu.diePtr(die_index);
+        try writer.print("{}\n", .{die.fmtDie(ctx.table, cu, ctx.ctx)});
+    }
 }
 
 pub const Header = struct {
@@ -76,11 +112,13 @@ pub const Header = struct {
 };
 
 pub const DebugInfoEntry = struct {
-    data: []const u8,
+    code: u64,
     loc: Loc,
+    values: std.ArrayListUnmanaged([]const u8) = .{},
     children: std.ArrayListUnmanaged(usize) = .{},
 
     pub fn deinit(die: *DebugInfoEntry, gpa: Allocator) void {
+        die.values.deinit(gpa);
         die.children.deinit(gpa);
     }
 
@@ -97,18 +135,25 @@ pub const DebugInfoEntry = struct {
         @compileError("do not format DebugInfoEntry directly; use fmtDie instead");
     }
 
-    pub fn fmtDie(die: DebugInfoEntry, decl: AbbrevTable.Decl, cu: CompileUnit) std.fmt.Formatter(formatDie) {
+    pub fn fmtDie(
+        die: DebugInfoEntry,
+        table: AbbrevTable,
+        cu: *CompileUnit,
+        ctx: *const Context,
+    ) std.fmt.Formatter(formatDie) {
         return .{ .data = .{
             .die = die,
-            .decl = decl,
+            .table = table,
             .cu = cu,
+            .ctx = ctx,
         } };
     }
 
     const FormatDieCtx = struct {
         die: DebugInfoEntry,
-        decl: AbbrevTable.Decl,
-        cu: CompileUnit,
+        table: AbbrevTable,
+        cu: *CompileUnit,
+        ctx: *const Context,
     };
 
     fn formatDie(
@@ -119,16 +164,40 @@ pub const DebugInfoEntry = struct {
     ) !void {
         _ = unused_fmt_string;
         _ = options;
+        const decl = ctx.table.getDecl(ctx.die.code).?;
         try writer.print("{}: {}\n", .{
             ctx.cu.header.dw_format.fmtOffset(ctx.die.loc.pos),
-            AbbrevTable.fmtTag(ctx.decl.tag),
+            AbbrevTable.fmtTag(decl.tag),
         });
+        for (decl.attrs.items, ctx.die.values.items) |attr, value| {
+            try writer.print("  {} (", .{AbbrevTable.fmtAt(attr.at)});
+            switch (attr.form) {
+                dwarf.FORM.flag,
+                dwarf.FORM.flag_present,
+                => try writer.print("{}", .{attr.getFlag(value)}),
+
+                dwarf.FORM.string,
+                dwarf.FORM.strp,
+                => try writer.print("{s}", .{attr.getString(value, ctx.cu.header.dw_format, ctx.ctx)}),
+
+                else => {},
+            }
+            try writer.writeAll(")\n");
+        }
+        // TODO indents
+        for (ctx.die.children.items) |child_index| {
+            const child = ctx.cu.diePtr(child_index);
+            try writer.print("  {}\n", .{child.fmtDie(ctx.table, ctx.cu, ctx.ctx)});
+        }
     }
 };
 
+const dwarf = std.dwarf;
 const std = @import("std");
 const AbbrevTable = @import("AbbrevTable.zig");
+const Attr = AbbrevTable.Attr;
 const Allocator = std.mem.Allocator;
 const CompileUnit = @This();
+const Context = @import("Context.zig");
 const DwarfDump = @import("DwarfDump.zig");
 const Loc = DwarfDump.Loc;

@@ -124,30 +124,34 @@ fn parseDebugInfoEntry(
 ) anyerror!void {
     while (creader.bytes_read < cu.nextCompileUnitOffset()) {
         const die = try cu.addDie(self.gpa);
-        cu.diePtr(die).* = .{ .data = &[0]u8{}, .loc = .{ .pos = creader.bytes_read, .len = 0 } };
+        cu.diePtr(die).* = .{
+            .code = undefined,
+            .loc = .{ .pos = creader.bytes_read, .len = 0 },
+        };
         if (parent) |p| {
             try cu.diePtr(p).children.append(self.gpa, die);
         } else {
             try cu.children.append(self.gpa, die);
         }
 
-        std.log.warn("start = {x}", .{creader.bytes_read});
         const code = try leb.readULEB128(u64, creader.reader());
-        std.log.warn("code = {x}", .{code});
+        cu.diePtr(die).code = code;
+
         const decl = table.getDecl(code) orelse @panic("no suitable abbreviation decl found");
         if (decl.isNull()) {
             if (parent == null) continue;
             return; // Close scope
         }
 
-        const start = creader.bytes_read;
+        const data = self.ctx.getDebugInfoData().?;
+        try cu.diePtr(die).values.ensureTotalCapacityPrecise(self.gpa, decl.attrs.items.len);
+
         for (decl.attrs.items) |attr| {
-            if (attr.isNull()) break;
+            const start = creader.bytes_read;
             try advanceByFormSize(cu, attr.form, creader);
-            std.log.warn("attr = {}, nread = {x}", .{ attr, creader.bytes_read - start });
+            const end = creader.bytes_read;
+            cu.diePtr(die).values.appendAssumeCapacity(data[start..end]);
         }
-        const end = creader.bytes_read;
-        cu.diePtr(die).data = self.ctx.getDebugInfoData().?[start..end];
 
         if (decl.children) {
             // Open scope
@@ -161,6 +165,8 @@ fn parseDebugInfoEntry(
 fn advanceByFormSize(cu: *CompileUnit, form: u64, creader: anytype) !void {
     const reader = creader.reader();
     switch (form) {
+        0 => {},
+
         dwarf.FORM.strp,
         dwarf.FORM.sec_offset,
         dwarf.FORM.ref_addr,
@@ -246,8 +252,9 @@ pub fn printAbbrevTables(self: DwarfDump, writer: anytype) !void {
 
 pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
     try writer.writeAll(".debug_info contents:\n");
-    for (self.compile_units.items) |cu| {
-        try writer.print("{}\n", .{cu});
+    for (self.compile_units.items) |*cu| {
+        const table = self.getAbbrevTable(cu.header.debug_abbrev_offset).?;
+        try writer.print("{}\n", .{cu.fmtCompileUnit(table, self.ctx)});
     }
 }
 
@@ -452,13 +459,6 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
 //     }
 // }
 
-// fn formatIndent(len: usize, writer: anytype) !void {
-//     var i: usize = 0;
-//     while (i < len) : (i += 1) {
-//         try writer.writeByte(' ');
-//     }
-// }
-
 // fn formatLang(value: u16) []const u8 {
 //     return switch (value) {
 //         std.dwarf.LANG.C99 => "DW_LANG_C99",
@@ -466,303 +466,11 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
 //     };
 // }
 
-// fn formatDIETag(tag: u64, buffer: *[256]u8) ![]const u8 {
-//     switch (tag) {
-//         dwarf.TAG.lo_user...dwarf.TAG.hi_user => {
-//             const string: []const u8 = switch (tag) {
-//                 0x4109 => "DW_TAG_GNU_call_site",
-//                 0x410a => "DW_TAG_GNU_call_site_parameter",
-//                 else => return std.fmt.bufPrint(buffer, "DW_TAG_unknown_{x}", .{tag}),
-//             };
-//             return std.fmt.bufPrint(buffer, "{s}", .{string});
-//         },
-
-//         else => {
-//             const ti = @typeInfo(std.dwarf.TAG);
-//             inline for (ti.Struct.decls) |decl| {
-//                 if (@field(std.dwarf.TAG, decl.name) == tag) {
-//                     return std.fmt.bufPrint(buffer, "DW_TAG_" ++ decl.name, .{});
-//                 }
-//             }
-//             log.err("unexpected TAG value: {x}", .{tag});
-//             return error.UnexpectedTag;
-//         },
-//     }
-// }
-
-// fn formatATName(at: u64, buffer: *[256]u8) ![]const u8 {
-//     switch (at) {
-//         dwarf.AT.lo_user...dwarf.AT.hi_user => {
-//             const string: []const u8 = switch (at) {
-//                 0x2111 => "DW_AT_GNU_call_site_value",
-//                 0x2113 => "DW_AT_GNU_call_site_target",
-//                 0x2115 => "DW_AT_GNU_tail_cail",
-//                 0x2117 => "DW_AT_GNU_all_call_sites",
-//                 0x3e02 => "DW_AT_LLVM_sysroot",
-//                 0x3fef => "DW_AT_APPLE_sdk",
-//                 else => return std.fmt.bufPrint(buffer, "DW_AT_unknown_{x}", .{at}),
-//             };
-//             return std.fmt.bufPrint(buffer, "{s}", .{string});
-//         },
-
-//         else => {
-//             const ti = @typeInfo(std.dwarf.AT);
-//             inline for (ti.Struct.decls) |decl| {
-//                 if (@field(std.dwarf.AT, decl.name) == at) {
-//                     return std.fmt.bufPrint(buffer, "DW_AT_" ++ decl.name, .{});
-//                 }
-//             }
-//             log.err("unexpected AT value: {x}", .{at});
-//             return error.UnexpectedAttribute;
-//         },
-//     }
-// }
-
-// fn Result(comptime T: type) type {
-//     return struct { off: usize, value: T };
-// }
-
-// fn result(off: usize, value: anytype) Result(@TypeOf(value)) {
-//     return .{ .off = off, .value = value };
-// }
-
-// fn getCompileUnitIterator(ctx: *const Context) CompileUnitIterator {
-//     return .{ .ctx = ctx };
-// }
-
-// const CompileUnitIterator = struct {
-//     ctx: *const Context,
-//     pos: usize = 0,
-
-//     fn next(self: *CompileUnitIterator) !?Result(CompileUnit) {
-//         const di = self.ctx.getDebugInfoData() orelse return null;
-//         if (self.pos >= di.len) return null;
-
-//         var stream = std.io.fixedBufferStream(di[self.pos..]);
-//         var creader = std.io.countingReader(stream.reader());
-//         const reader = creader.reader();
-
-//         const cuh = try CompileUnit.Header.read(reader);
-//         const total_length = cuh.header.length + @as(u64, if (cuh.header.is64Bit()) 12 else 4);
-
-//         const cu = CompileUnit{
-//             .cuh = cuh,
-//             .debug_info_off = self.pos + creader.bytes_read,
-//         };
-//         const res = result(self.pos, cu);
-
-//         self.pos += total_length;
-
-//         return res;
-//     }
-// };
-
-// fn genAbbrevLookupByKind(ctx: *const Context, off: usize, lookup: *AbbrevLookupTable) !void {
-//     const da = ctx.getDebugAbbrevData().?;
-//     const data = da[off..];
-//     var stream = std.io.fixedBufferStream(data);
-//     var creader = std.io.countingReader(stream.reader());
-//     const reader = creader.reader();
-
-//     while (true) {
-//         const kind = try leb.readULEB128(u64, reader);
-
-//         if (kind == 0) break;
-
-//         const pos = creader.bytes_read;
-//         _ = try leb.readULEB128(u64, reader); // TAG
-//         _ = try reader.readByte(); // CHILDREN
-
-//         while (true) {
-//             const name = try leb.readULEB128(u64, reader);
-//             const form = try leb.readULEB128(u64, reader);
-
-//             if (name == 0 and form == 0) break;
-//         }
-
-//         try lookup.putNoClobber(kind, .{
-//             .pos = pos,
-//             .len = creader.bytes_read - pos - 2,
-//         });
-//     }
-// }
-
-// const CompileUnit = struct {
-//     cuh: Header,
-//     debug_info_off: usize,
-
-//     const Header = struct {
-//         header: DwarfHeader,
-//         version: u16,
-//         debug_abbrev_offset: u64,
-//         address_size: u8,
-
-//         fn read(reader: anytype) !Header {
-//             const header = try DwarfHeader.parseReader(reader);
-//             const version = try reader.readIntLittle(u16);
-//             const debug_abbrev_offset = if (header.is64Bit())
-//                 try reader.readIntLittle(u64)
-//             else
-//                 try reader.readIntLittle(u32);
-//             const address_size = try reader.readIntLittle(u8);
-
-//             return Header{
-//                 .header = header,
-//                 .version = version,
-//                 .debug_abbrev_offset = debug_abbrev_offset,
-//                 .address_size = address_size,
-//             };
-//         }
-//     };
-
-//     fn size(self: CompileUnit) usize {
-//         return if (self.cuh.header.is64Bit()) @as(usize, 8) else 4 + self.cuh.header.length;
-//     }
-
-//     fn getDebugInfo(self: CompileUnit, ctx: *const Context) []const u8 {
-//         const di = ctx.getDebugInfoData().?;
-//         return di[self.debug_info_off..][0..self.cuh.header.length];
-//     }
-
-//     fn getAbbrevEntryIterator(self: CompileUnit, ctx: *const Context) AbbrevEntryIterator {
-//         return .{ .ctx = ctx, .cu = self };
-//     }
-// };
-
-// const DwarfHeader = struct {
-//     length: u64,
-//     format: enum {
-//         @"32bit",
-//         @"64bit",
-//     },
-
-//     fn is64Bit(header: DwarfHeader) bool {
-//         return header.format == .@"64bit";
-//     }
-
-//     fn size(header: DwarfHeader) usize {
-//         return if (header.is64Bit()) 12 else 4;
-//     }
-
-//     fn parse(buffer: []const u8) !DwarfHeader {
-//         var stream = std.io.fixedBufferStream(buffer);
-//         return parseReader(stream.reader());
-//     }
-
-//     fn parseReader(reader: anytype) !DwarfHeader {
-//         var length: u64 = try reader.readIntLittle(u32);
-//         const is_64bit = length == 0xffffffff;
-//         if (is_64bit) {
-//             length = try reader.readIntLittle(u64);
-//         }
-//         return DwarfHeader{
-//             .length = length,
-//             .format = if (is_64bit) .@"64bit" else .@"32bit",
-//         };
-//     }
-// };
-
-// const AbbrevEntryIterator = struct {
-//     ctx: *const Context,
-//     cu: CompileUnit,
-//     pos: usize = 0,
-
-//     fn next(self: *AbbrevEntryIterator, lookup: AbbrevLookupTable) !?Result(AbbrevEntry) {
-//         const di = self.ctx.getDebugInfoData() orelse return null;
-//         if (self.pos + self.cu.debug_info_off >= di.len) return null;
-
-//         const data = di[self.pos + self.cu.debug_info_off ..];
-//         var stream = std.io.fixedBufferStream(data);
-//         var creader = std.io.countingReader(stream.reader());
-//         const reader = creader.reader();
-
-//         const kind = try leb.readULEB128(u64, reader);
-//         self.pos += creader.bytes_read;
-
-//         if (kind == 0) {
-//             return result(self.pos + self.cu.debug_info_off - creader.bytes_read, AbbrevEntry.null());
-//         }
-
-//         const abbrev_pos = lookup.get(kind) orelse return error.MalformedDwarf;
-//         const len = try findAbbrevEntrySize(
-//             self.ctx,
-//             abbrev_pos.pos,
-//             abbrev_pos.len,
-//             self.pos + self.cu.debug_info_off,
-//             self.cu.cuh,
-//         );
-//         const entry = try getAbbrevEntry(
-//             self.ctx,
-//             abbrev_pos.pos,
-//             abbrev_pos.len,
-//             self.pos + self.cu.debug_info_off,
-//             len,
-//         );
-
-//         self.pos += len;
-
-//         return result(self.pos + self.cu.debug_info_off - len - creader.bytes_read, entry);
-//     }
-// };
-
-// const AbbrevEntry = struct {
-//     tag: u64,
-//     children: u8,
-//     debug_abbrev_off: usize,
-//     debug_abbrev_len: usize,
-//     debug_info_off: usize,
-//     debug_info_len: usize,
-
-//     fn @"null"() AbbrevEntry {
-//         return .{
-//             .tag = 0,
-//             .children = dwarf.CHILDREN.no,
-//             .debug_abbrev_off = 0,
-//             .debug_abbrev_len = 0,
-//             .debug_info_off = 0,
-//             .debug_info_len = 0,
-//         };
-//     }
-
-//     fn hasChildren(self: AbbrevEntry) bool {
-//         return self.children == dwarf.CHILDREN.yes;
-//     }
-
-//     fn getDebugInfo(self: AbbrevEntry, ctx: *const Context) []const u8 {
-//         const di = ctx.getDebugInfoData().?;
-//         return di[self.debug_info_off..][0..self.debug_info_len];
-//     }
-
-//     inline fn getDebugAbbrev(self: AbbrevEntry, ctx: *const Context) []const u8 {
-//         const da = ctx.getDebugAbbrevData().?;
-//         return da[self.debug_abbrev_off..][0..self.debug_abbrev_len];
-//     }
-
-//     fn getAttributeIterator(self: AbbrevEntry, ctx: *const Context, cuh: CompileUnit.Header) AttributeIterator {
-//         return .{ .entry = self, .ctx = ctx, .cuh = cuh };
-//     }
-// };
-
 // const Attribute = struct {
 //     name: u64,
 //     form: u64,
 //     debug_info_off: usize,
 //     debug_info_len: usize,
-
-//     inline fn getDebugInfo(self: Attribute, ctx: *const Context) []const u8 {
-//         const di = ctx.getDebugInfoData().?;
-//         return di[self.debug_info_off..][0..self.debug_info_len];
-//     }
-
-//     fn getFlag(self: Attribute, ctx: *const Context) ?bool {
-//         const debug_info = self.getDebugInfo(ctx);
-
-//         switch (self.form) {
-//             dwarf.FORM.flag => return debug_info[0] == 1,
-//             dwarf.FORM.flag_present => return true,
-//             else => return null,
-//         }
-//     }
 
 //     fn getString(self: Attribute, ctx: *const Context, cuh: CompileUnit.Header) ?[]const u8 {
 //         const debug_info = self.getDebugInfo(ctx);
@@ -853,114 +561,6 @@ pub fn printCompileUnits(self: DwarfDump, writer: anytype) !void {
 //     //     const debug_info = self.get
 //     // }
 // };
-
-// const AttributeIterator = struct {
-//     entry: AbbrevEntry,
-//     ctx: *const Context,
-//     cuh: CompileUnit.Header,
-//     debug_abbrev_pos: usize = 0,
-//     debug_info_pos: usize = 0,
-
-//     fn next(self: *AttributeIterator) !?Result(Attribute) {
-//         const debug_abbrev = self.entry.getDebugAbbrev(self.ctx);
-//         if (self.debug_abbrev_pos >= debug_abbrev.len) return null;
-
-//         var stream = std.io.fixedBufferStream(debug_abbrev[self.debug_abbrev_pos..]);
-//         var creader = std.io.countingReader(stream.reader());
-//         const reader = creader.reader();
-
-//         const name = try leb.readULEB128(u64, reader);
-//         const form = try leb.readULEB128(u64, reader);
-
-//         self.debug_abbrev_pos += creader.bytes_read;
-
-//         const len = try findFormSize(
-//             self.ctx,
-//             form,
-//             self.debug_info_pos + self.entry.debug_info_off,
-//             self.cuh,
-//         );
-//         const attr = Attribute{
-//             .name = name,
-//             .form = form,
-//             .debug_info_off = self.debug_info_pos + self.entry.debug_info_off,
-//             .debug_info_len = len,
-//         };
-
-//         self.debug_info_pos += len;
-
-//         return result(attr.debug_info_off, attr);
-//     }
-// };
-
-// fn getAbbrevEntry(ctx: *const Context, da_off: usize, da_len: usize, di_off: usize, di_len: usize) !AbbrevEntry {
-//     const data = ctx.getDebugAbbrevData().?;
-//     const debug_abbrev = data[da_off..][0..da_len];
-//     var stream = std.io.fixedBufferStream(debug_abbrev);
-//     var creader = std.io.countingReader(stream.reader());
-//     const reader = creader.reader();
-
-//     const tag = try leb.readULEB128(u64, reader);
-//     const children = switch (tag) {
-//         std.dwarf.TAG.const_type,
-//         std.dwarf.TAG.packed_type,
-//         std.dwarf.TAG.pointer_type,
-//         std.dwarf.TAG.reference_type,
-//         std.dwarf.TAG.restrict_type,
-//         std.dwarf.TAG.rvalue_reference_type,
-//         std.dwarf.TAG.shared_type,
-//         std.dwarf.TAG.volatile_type,
-//         => if (creader.bytes_read == da_len) std.dwarf.CHILDREN.no else try reader.readByte(),
-//         else => try reader.readByte(),
-//     };
-
-//     return AbbrevEntry{
-//         .tag = tag,
-//         .children = children,
-//         .debug_abbrev_off = creader.bytes_read + da_off,
-//         .debug_abbrev_len = da_len - creader.bytes_read,
-//         .debug_info_off = di_off,
-//         .debug_info_len = di_len,
-//     };
-// }
-
-// fn findAbbrevEntrySize(ctx: *const Context, da_off: usize, da_len: usize, di_off: usize, cuh: CompileUnit.Header) !usize {
-//     const data = ctx.getDebugAbbrevData().?;
-//     const debug_abbrev = data[da_off..][0..da_len];
-//     var stream = std.io.fixedBufferStream(debug_abbrev);
-//     var creader = std.io.countingReader(stream.reader());
-//     const reader = creader.reader();
-
-//     const tag = try leb.readULEB128(u64, reader);
-//     _ = switch (tag) {
-//         std.dwarf.TAG.const_type,
-//         std.dwarf.TAG.packed_type,
-//         std.dwarf.TAG.pointer_type,
-//         std.dwarf.TAG.reference_type,
-//         std.dwarf.TAG.restrict_type,
-//         std.dwarf.TAG.rvalue_reference_type,
-//         std.dwarf.TAG.shared_type,
-//         std.dwarf.TAG.volatile_type,
-//         => if (creader.bytes_read != da_len) try reader.readByte(),
-//         else => try reader.readByte(),
-//     };
-
-//     var len: usize = 0;
-//     while (creader.bytes_read < debug_abbrev.len) {
-//         _ = try leb.readULEB128(u64, reader);
-//         const form = try leb.readULEB128(u64, reader);
-//         const form_len = try findFormSize(ctx, form, di_off + len, cuh);
-//         len += form_len;
-//     }
-
-//     return len;
-// }
-
-fn getDwarfString(ctx: *const Context, off: u64) []const u8 {
-    const debug_str = ctx.getDebugStringData().?;
-    assert(off < debug_str.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(debug_str.ptr + off)), 0);
-}
 
 fn getAbbrevTable(self: DwarfDump, off: u64) ?AbbrevTable {
     for (self.abbrev_tables.items) |table| {
