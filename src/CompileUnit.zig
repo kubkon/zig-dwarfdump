@@ -68,14 +68,14 @@ pub fn formatCompileUnit(
     _ = unused_fmt_string;
     _ = options;
     const cu = ctx.cu;
-    try writer.print("{}: Compile Unit: {} (next unit at {})\n", .{
+    try writer.print("{}: Compile Unit: {} (next unit at {})\n\n", .{
         cu.header.dw_format.fmtOffset(cu.loc.pos),
         cu.header,
         cu.header.dw_format.fmtOffset(cu.nextCompileUnitOffset()),
     });
     for (cu.children.items) |die_index| {
         const die = cu.diePtr(die_index);
-        try writer.print("{}\n", .{die.fmtDie(ctx.table, cu, ctx.ctx, null)});
+        try writer.print("{}\n", .{die.fmtDie(ctx.table, cu, ctx.ctx, null, 0)});
     }
 }
 
@@ -141,6 +141,7 @@ pub const DebugInfoEntry = struct {
         cu: *CompileUnit,
         ctx: *const Context,
         low_pc: ?u64,
+        indent: usize,
     ) std.fmt.Formatter(formatDie) {
         return .{ .data = .{
             .die = die,
@@ -148,6 +149,7 @@ pub const DebugInfoEntry = struct {
             .cu = cu,
             .ctx = ctx,
             .low_pc = low_pc,
+            .indent = indent,
         } };
     }
 
@@ -157,6 +159,7 @@ pub const DebugInfoEntry = struct {
         cu: *CompileUnit,
         ctx: *const Context,
         low_pc: ?u64 = null,
+        indent: usize = 0,
     };
 
     fn formatDie(
@@ -169,30 +172,40 @@ pub const DebugInfoEntry = struct {
         _ = options;
 
         try writer.print("{}: ", .{ctx.cu.header.dw_format.fmtOffset(ctx.die.loc.pos)});
+        const align_base: usize = 4 + switch (ctx.cu.header.dw_format) {
+            .dwarf32 => @as(usize, 8),
+            .dwarf64 => 16,
+        };
+        try fmtIndent(ctx.indent, writer);
 
         if (ctx.die.code == 0) {
-            try writer.writeAll("NULL");
+            try writer.writeAll("NULL\n\n");
             return;
         }
 
         const decl = ctx.table.getDecl(ctx.die.code).?;
         try writer.print("{}\n", .{AbbrevTable.fmtTag(decl.tag)});
+
         var low_pc: ?u64 = ctx.low_pc;
         for (decl.attrs.items, ctx.die.values.items) |attr, value| {
-            try writer.print("  {} (", .{AbbrevTable.fmtAt(attr.at)});
+            try fmtIndent(ctx.indent + align_base + 2, writer);
+            try writer.print("{} (", .{AbbrevTable.fmtAt(attr.at)});
+
             formatAtFormInner(attr, value, ctx.cu, &low_pc, ctx.ctx, writer) catch |err| switch (err) {
-                error.UnhandledForm => try writer.print("error: unhandled form 0x{x} for attribute\n", .{attr.form}),
-                error.UnexpectedForm => try writer.print("error: unexpected FORM value: {x}", .{attr.form}),
+                error.UnhandledForm => try writer.print("error: unhandled FORM {x} for attribute", .{attr.form}),
+                error.UnexpectedForm => try writer.print("error: unexpected FORM {x}", .{attr.form}),
                 error.MalformedDwarf => try writer.print("error: malformed DWARF while parsing FORM {x}", .{attr.form}),
                 error.Overflow, error.EndOfStream => unreachable,
                 else => |e| return e,
             };
+
             try writer.writeAll(")\n");
         }
-        // TODO indents
+        try writer.writeByte('\n');
+
         for (ctx.die.children.items) |child_index| {
             const child = ctx.cu.diePtr(child_index);
-            try writer.print("  {}\n", .{child.fmtDie(ctx.table, ctx.cu, ctx.ctx, low_pc)});
+            try writer.print("{}", .{child.fmtDie(ctx.table, ctx.cu, ctx.ctx, low_pc, ctx.indent + 2)});
         }
     }
 
@@ -336,6 +349,10 @@ pub const DebugInfoEntry = struct {
         }
     }
 };
+
+fn fmtIndent(indent: usize, writer: anytype) !void {
+    for (0..indent) |_| try writer.writeByte(' ');
+}
 
 const dwarf = std.dwarf;
 const std = @import("std");
