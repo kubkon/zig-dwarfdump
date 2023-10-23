@@ -46,33 +46,31 @@ fn parseAbbrevTables(self: *DwarfDump) !void {
         table.* = .{ .loc = .{ .pos = creader.bytes_read, .len = 0 } };
 
         while (true) {
+            const code = try leb.readULEB128(u64, reader);
+            if (code == 0) break;
+
             const decl = try table.decls.addOne(self.gpa);
             decl.* = .{
-                .code = undefined,
+                .code = code,
                 .tag = undefined,
                 .children = false,
                 .loc = .{ .pos = creader.bytes_read, .len = 1 },
             };
-
-            decl.code = try leb.readULEB128(u64, reader);
-
-            if (decl.isNull()) break;
-
             decl.tag = try leb.readULEB128(u64, reader);
             decl.children = (try reader.readByte()) > 0;
 
             while (true) {
+                const at = try leb.readULEB128(u64, reader);
+                const form = try leb.readULEB128(u64, reader);
+                if (at == 0 and form == 0) break;
+
                 const attr = try decl.attrs.addOne(self.gpa);
                 attr.* = .{
-                    .at = undefined,
-                    .form = undefined,
+                    .at = at,
+                    .form = form,
                     .loc = .{ .pos = creader.bytes_read, .len = 0 },
                 };
-                attr.at = try leb.readULEB128(u64, reader);
-                attr.form = try leb.readULEB128(u64, reader);
                 attr.loc.len = creader.bytes_read - attr.loc.pos;
-
-                if (attr.at == 0 and attr.form == 0) break;
             }
 
             decl.loc.len = creader.bytes_read - decl.loc.pos;
@@ -137,12 +135,12 @@ fn parseDebugInfoEntry(
         const code = try leb.readULEB128(u64, creader.reader());
         cu.diePtr(die).code = code;
 
-        const decl = table.getDecl(code) orelse @panic("no suitable abbreviation decl found");
-        if (decl.isNull()) {
+        if (code == 0) {
             if (parent == null) continue;
             return; // Close scope
         }
 
+        const decl = table.getDecl(code) orelse @panic("no suitable abbreviation decl found");
         const data = self.ctx.getDebugInfoData().?;
         try cu.diePtr(die).values.ensureTotalCapacityPrecise(self.gpa, decl.attrs.items.len);
 
@@ -165,8 +163,6 @@ fn parseDebugInfoEntry(
 fn advanceByFormSize(cu: *CompileUnit, form: u64, creader: anytype) !void {
     const reader = creader.reader();
     switch (form) {
-        0 => {},
-
         dwarf.FORM.strp,
         dwarf.FORM.sec_offset,
         dwarf.FORM.ref_addr,

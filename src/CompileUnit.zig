@@ -167,11 +167,16 @@ pub const DebugInfoEntry = struct {
     ) !void {
         _ = unused_fmt_string;
         _ = options;
+
+        try writer.print("{}: ", .{ctx.cu.header.dw_format.fmtOffset(ctx.die.loc.pos)});
+
+        if (ctx.die.code == 0) {
+            try writer.writeAll("NULL");
+            return;
+        }
+
         const decl = ctx.table.getDecl(ctx.die.code).?;
-        try writer.print("{}: {}\n", .{
-            ctx.cu.header.dw_format.fmtOffset(ctx.die.loc.pos),
-            AbbrevTable.fmtTag(decl.tag),
-        });
+        try writer.print("{}\n", .{AbbrevTable.fmtTag(decl.tag)});
         var low_pc: ?u64 = ctx.low_pc;
         for (decl.attrs.items, ctx.die.values.items) |attr, value| {
             try writer.print("  {} (", .{AbbrevTable.fmtAt(attr.at)});

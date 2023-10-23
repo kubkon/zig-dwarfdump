@@ -39,10 +39,6 @@ pub const Decl = struct {
         decl.attrs.deinit(gpa);
     }
 
-    pub fn isNull(decl: Decl) bool {
-        return decl.code == 0;
-    }
-
     pub fn format(
         decl: Decl,
         comptime unused_fmt_string: []const u8,
@@ -53,7 +49,6 @@ pub const Decl = struct {
         _ = options;
 
         try writer.print("[{d}]  ", .{decl.code});
-        if (decl.isNull()) return;
 
         try writer.print("{}", .{fmtTag(decl.tag)});
         try writer.print("  DW_CHILDREN_{s}\n", .{if (decl.children) "yes" else "no"});
@@ -112,10 +107,6 @@ pub const Attr = struct {
     at: u64,
     form: u64,
     loc: Loc,
-
-    pub fn isNull(attr: Attr) bool {
-        return attr.at == 0 and attr.form == 0;
-    }
 
     pub fn getFlag(attr: Attr, value: []const u8) ?bool {
         return switch (attr.form) {
