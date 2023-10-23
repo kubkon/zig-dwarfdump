@@ -117,15 +117,15 @@ pub const Attr = struct {
         return attr.at == 0 and attr.form == 0;
     }
 
-    pub fn getFlag(attr: Attr, value: []const u8) bool {
-        switch (attr.form) {
-            dwarf.FORM.flag => return value[0] == 1,
-            dwarf.FORM.flag_present => return true,
-            else => unreachable,
-        }
+    pub fn getFlag(attr: Attr, value: []const u8) ?bool {
+        return switch (attr.form) {
+            dwarf.FORM.flag => value[0] == 1,
+            dwarf.FORM.flag_present => true,
+            else => null,
+        };
     }
 
-    pub fn getString(attr: Attr, value: []const u8, dwf: DwarfDump.Format, ctx: *const Context) []const u8 {
+    pub fn getString(attr: Attr, value: []const u8, dwf: DwarfDump.Format, ctx: *const Context) ?[]const u8 {
         switch (attr.form) {
             dwarf.FORM.string => {
                 return mem.sliceTo(@as([*:0]const u8, @ptrCast(value.ptr)), 0);
@@ -137,8 +137,71 @@ pub const Attr = struct {
                 };
                 return ctx.getDwarfString(off);
             },
-            else => unreachable,
+            else => return null,
         }
+    }
+
+    pub fn getSecOffset(attr: Attr, value: []const u8, dwf: DwarfDump.Format) ?u64 {
+        return switch (attr.form) {
+            dwarf.FORM.sec_offset => switch (dwf) {
+                .dwarf32 => mem.readIntLittle(u32, value[0..4]),
+                .dwarf64 => mem.readIntLittle(u64, value[0..8]),
+            },
+            else => null,
+        };
+    }
+
+    pub fn getConstant(attr: Attr, value: []const u8) !?i128 {
+        var stream = std.io.fixedBufferStream(value);
+        const reader = stream.reader();
+        return switch (attr.form) {
+            dwarf.FORM.data1 => value[0],
+            dwarf.FORM.data2 => mem.readIntLittle(u16, value[0..2]),
+            dwarf.FORM.data4 => mem.readIntLittle(u32, value[0..4]),
+            dwarf.FORM.data8 => mem.readIntLittle(u64, value[0..8]),
+            dwarf.FORM.udata => try leb.readULEB128(u64, reader),
+            dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
+            else => null,
+        };
+    }
+
+    pub fn getReference(attr: Attr, value: []const u8, dwf: DwarfDump.Format) !?u64 {
+        var stream = std.io.fixedBufferStream(value);
+        const reader = stream.reader();
+        return switch (attr.form) {
+            dwarf.FORM.ref1 => value[0],
+            dwarf.FORM.ref2 => mem.readIntLittle(u16, value[0..2]),
+            dwarf.FORM.ref4 => mem.readIntLittle(u32, value[0..4]),
+            dwarf.FORM.ref8 => mem.readIntLittle(u64, value[0..8]),
+            dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
+            dwarf.FORM.ref_addr => switch (dwf) {
+                .dwarf32 => mem.readIntLittle(u32, value[0..4]),
+                .dwarf64 => mem.readIntLittle(u64, value[0..8]),
+            },
+            else => null,
+        };
+    }
+
+    pub fn getAddr(attr: Attr, value: []const u8, cuh: CompileUnit.Header) ?u64 {
+        return switch (attr.form) {
+            dwarf.FORM.addr => switch (cuh.address_size) {
+                1 => value[0],
+                2 => mem.readIntLittle(u16, value[0..2]),
+                4 => mem.readIntLittle(u32, value[0..4]),
+                8 => mem.readIntLittle(u64, value[0..8]),
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    pub fn getExprloc(attr: Attr, value: []const u8) !?[]const u8 {
+        if (attr.form != dwarf.FORM.exprloc) return null;
+        var stream = std.io.fixedBufferStream(value);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+        const expr_len = try leb.readULEB128(u64, reader);
+        return value[creader.bytes_read..][0..expr_len];
     }
 
     pub fn format(
@@ -207,11 +270,14 @@ fn formatAt(
 
 const AbbrevTable = @This();
 
-const std = @import("std");
+const assert = std.debug.assert;
 const dwarf = std.dwarf;
+const leb = std.leb;
 const mem = std.mem;
+const std = @import("std");
 
 const Allocator = mem.Allocator;
 const Context = @import("Context.zig");
+const CompileUnit = @import("CompileUnit.zig");
 const DwarfDump = @import("DwarfDump.zig");
 const Loc = DwarfDump.Loc;
