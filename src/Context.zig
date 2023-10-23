@@ -1,6 +1,7 @@
 const Context = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
@@ -86,4 +87,9 @@ pub fn getArch(base: *const Context) ?std.Target.Cpu.Arch {
         .elf => @fieldParentPtr(Elf, "base", base).getArch(),
         .macho => @fieldParentPtr(MachO, "base", base).getArch(),
     };
+}
+pub fn getDwarfString(base: *const Context, off: u64) []const u8 {
+    const debug_str = base.getDebugStringData().?;
+    assert(off < debug_str.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(debug_str.ptr + off)), 0);
 }

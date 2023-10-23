@@ -8,6 +8,7 @@ const usage =
     \\
     \\General options:
     \\--debug-info          Display .debug_info section contents (default)
+    \\--debug-abbrev        Display .debug_abbrev section contents
     \\--eh-frame            Display .eh_frame section contents
     \\--llvm-compatibility  Output is formatted exactly like llvm-dwarfdump, with no extra information
     \\--all, -a             Display all debug info sections
@@ -57,7 +58,8 @@ pub fn main() !void {
     var llvm_compat: bool = false;
 
     const PrintMatrix = packed struct {
-        debug_info: bool = true,
+        debug_info: bool = false,
+        debug_abbrev: bool = false,
         eh_frame: bool = false,
 
         const Int = blk: {
@@ -103,7 +105,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--all")) {
             print_matrix = PrintMatrix.enableAll();
         } else if (std.mem.eql(u8, arg, "--debug-info")) {
-            // Do nothing
+            print_matrix.debug_info = true;
+        } else if (std.mem.eql(u8, arg, "--debug-abbrev")) {
+            print_matrix.debug_abbrev = true;
         } else if (std.mem.eql(u8, arg, "--eh-frame")) {
             print_matrix.eh_frame = true;
         } else if (std.mem.eql(u8, arg, "--llvm-compatibility")) {
@@ -125,6 +129,10 @@ pub fn main() !void {
 
     if (print_matrix.debug_info) {
         try dd.printCompileUnits(stdout);
+        try stdout.writeAll("\n");
+    }
+    if (print_matrix.debug_abbrev) {
+        try dd.printAbbrevTables(stdout);
         try stdout.writeAll("\n");
     }
     if (print_matrix.eh_frame) {
