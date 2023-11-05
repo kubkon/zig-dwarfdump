@@ -95,16 +95,16 @@ fn parseCompileUnits(self: *DwarfDump) !void {
             .loc = .{ .pos = creader.bytes_read, .len = 0 },
         };
 
-        var length: u64 = try reader.readIntLittle(u32);
+        var length: u64 = try reader.readInt(u32, .little);
         const is_64bit = length == 0xffffffff;
         if (is_64bit) {
-            length = try reader.readIntLittle(u64);
+            length = try reader.readInt(u64, .little);
         }
         cu.header.dw_format = if (is_64bit) .dwarf64 else .dwarf32;
         cu.header.length = length;
-        cu.header.version = try reader.readIntLittle(u16);
+        cu.header.version = try reader.readInt(u16, .little);
         cu.header.debug_abbrev_offset = try readOffset(cu.header.dw_format, reader);
-        cu.header.address_size = try reader.readIntLittle(u8);
+        cu.header.address_size = try reader.readInt(u8, .little);
 
         const table = self.getAbbrevTable(cu.header.debug_abbrev_offset).?;
         try self.parseDebugInfoEntry(cu, table, null, &creader);
@@ -178,9 +178,9 @@ fn advanceByFormSize(cu: *CompileUnit, form: u64, creader: anytype) !void {
         dwarf.FORM.block,
         => {
             const len: u64 = switch (form) {
-                dwarf.FORM.block1 => try reader.readIntLittle(u8),
-                dwarf.FORM.block2 => try reader.readIntLittle(u16),
-                dwarf.FORM.block4 => try reader.readIntLittle(u32),
+                dwarf.FORM.block1 => try reader.readInt(u8, .little),
+                dwarf.FORM.block2 => try reader.readInt(u16, .little),
+                dwarf.FORM.block4 => try reader.readInt(u32, .little),
                 dwarf.FORM.block => try leb.readULEB128(u64, reader),
                 else => unreachable,
             };
@@ -263,8 +263,8 @@ fn getAbbrevTable(self: DwarfDump, off: u64) ?AbbrevTable {
 
 fn readOffset(format: Format, reader: anytype) !u64 {
     return switch (format) {
-        .dwarf32 => try reader.readIntLittle(u32),
-        .dwarf64 => try reader.readIntLittle(u64),
+        .dwarf32 => try reader.readInt(u32, .little),
+        .dwarf64 => try reader.readInt(u64, .little),
     };
 }
 
@@ -388,7 +388,7 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
 
         // TODO: Use the addr size / endianness of the file, provide in section
         .addr_size = @sizeOf(usize),
-        .endian = .Little,
+        .endian = .little,
     };
 
     var cies = std.AutoArrayHashMap(u64, CieWithHeader).init(self.gpa);
@@ -783,7 +783,7 @@ fn writeExpression(
     };
 
     switch (endian) {
-        inline .Little, .Big => |e| {
+        inline .little, .big => |e| {
             switch (addr_size_bytes) {
                 inline 2, 4, 8 => |size| {
                     const StackMachine = dwarf.expressions.StackMachine(.{

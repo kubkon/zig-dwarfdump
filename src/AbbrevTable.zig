@@ -123,8 +123,8 @@ pub const Attr = struct {
             },
             dwarf.FORM.strp => {
                 const off = switch (dwf) {
-                    .dwarf64 => mem.readIntLittle(u64, value[0..8]),
-                    .dwarf32 => mem.readIntLittle(u32, value[0..4]),
+                    .dwarf64 => mem.readInt(u64, value[0..8], .little),
+                    .dwarf32 => mem.readInt(u32, value[0..4], .little),
                 };
                 return ctx.getDwarfString(off);
             },
@@ -135,8 +135,8 @@ pub const Attr = struct {
     pub fn getSecOffset(attr: Attr, value: []const u8, dwf: DwarfDump.Format) ?u64 {
         return switch (attr.form) {
             dwarf.FORM.sec_offset => switch (dwf) {
-                .dwarf32 => mem.readIntLittle(u32, value[0..4]),
-                .dwarf64 => mem.readIntLittle(u64, value[0..8]),
+                .dwarf32 => mem.readInt(u32, value[0..4], .little),
+                .dwarf64 => mem.readInt(u64, value[0..8], .little),
             },
             else => null,
         };
@@ -147,9 +147,9 @@ pub const Attr = struct {
         const reader = stream.reader();
         return switch (attr.form) {
             dwarf.FORM.data1 => value[0],
-            dwarf.FORM.data2 => mem.readIntLittle(u16, value[0..2]),
-            dwarf.FORM.data4 => mem.readIntLittle(u32, value[0..4]),
-            dwarf.FORM.data8 => mem.readIntLittle(u64, value[0..8]),
+            dwarf.FORM.data2 => mem.readInt(u16, value[0..2], .little),
+            dwarf.FORM.data4 => mem.readInt(u32, value[0..4], .little),
+            dwarf.FORM.data8 => mem.readInt(u64, value[0..8], .little),
             dwarf.FORM.udata => try leb.readULEB128(u64, reader),
             dwarf.FORM.sdata => try leb.readILEB128(i64, reader),
             else => null,
@@ -161,13 +161,13 @@ pub const Attr = struct {
         const reader = stream.reader();
         return switch (attr.form) {
             dwarf.FORM.ref1 => value[0],
-            dwarf.FORM.ref2 => mem.readIntLittle(u16, value[0..2]),
-            dwarf.FORM.ref4 => mem.readIntLittle(u32, value[0..4]),
-            dwarf.FORM.ref8 => mem.readIntLittle(u64, value[0..8]),
+            dwarf.FORM.ref2 => mem.readInt(u16, value[0..2], .little),
+            dwarf.FORM.ref4 => mem.readInt(u32, value[0..4], .little),
+            dwarf.FORM.ref8 => mem.readInt(u64, value[0..8], .little),
             dwarf.FORM.ref_udata => try leb.readULEB128(u64, reader),
             dwarf.FORM.ref_addr => switch (dwf) {
-                .dwarf32 => mem.readIntLittle(u32, value[0..4]),
-                .dwarf64 => mem.readIntLittle(u64, value[0..8]),
+                .dwarf32 => mem.readInt(u32, value[0..4], .little),
+                .dwarf64 => mem.readInt(u64, value[0..8], .little),
             },
             else => null,
         };
@@ -177,9 +177,9 @@ pub const Attr = struct {
         return switch (attr.form) {
             dwarf.FORM.addr => switch (cuh.address_size) {
                 1 => value[0],
-                2 => mem.readIntLittle(u16, value[0..2]),
-                4 => mem.readIntLittle(u32, value[0..4]),
-                8 => mem.readIntLittle(u64, value[0..8]),
+                2 => mem.readInt(u16, value[0..2], .little),
+                4 => mem.readInt(u32, value[0..4], .little),
+                8 => mem.readInt(u64, value[0..8], .little),
                 else => null,
             },
             else => null,
