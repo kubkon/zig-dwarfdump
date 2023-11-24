@@ -604,7 +604,7 @@ fn writeFde(
     instruction_stream.pos = 0;
     while (instruction_stream.pos < instruction_stream.buffer.len) {
         const instruction = try dwarf.call_frame.Instruction.read(&instruction_stream, options.addr_size, options.endian);
-        var prev_row = try cie_with_header.vm.step(self.gpa, cie.*, false, instruction);
+        const prev_row = try cie_with_header.vm.step(self.gpa, cie.*, false, instruction);
         if (cie_with_header.vm.current_row.offset != prev_row.offset) {
             try writer.print("  0x{x}: ", .{fde.pc_begin + prev_row.offset});
             try self.writeRow(
