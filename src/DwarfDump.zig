@@ -373,6 +373,9 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                 }
             }
         },
+        .wasm => {
+            try writer.writeAll("\nsection not found");
+        },
     }
 }
 
