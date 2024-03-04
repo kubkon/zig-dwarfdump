@@ -373,9 +373,7 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                 }
             }
         },
-        .wasm => {
-            try writer.writeAll("\nsection not found");
-        },
+        .wasm => {}, // WebAssembly does not have the eh_frame section
     }
 }
 

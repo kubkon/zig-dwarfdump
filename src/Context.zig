@@ -75,7 +75,7 @@ pub fn getDebugInfoData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugInfoData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugInfoData(),
-        .wasm => @panic("TODO: implement getDebugInfoData for Wasm"),
+        .wasm => @fieldParentPtr(Wasm, "base", base).getDebugInfoData(),
     };
 }
 
@@ -83,7 +83,7 @@ pub fn getDebugStringData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugStringData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugStringData(),
-        .wasm => @panic("TODO: implement getDebugStringData for Wasm"),
+        .wasm => @fieldParentPtr(Wasm, "base", base).getDebugStringData(),
     };
 }
 
@@ -91,7 +91,7 @@ pub fn getDebugAbbrevData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugAbbrevData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugAbbrevData(),
-        .wasm => @panic("TODO: implement getDebugAbbrevData for Wasm"),
+        .wasm => @fieldParentPtr(Wasm, "base", base).getDebugAbbrevData(),
     };
 }
 
