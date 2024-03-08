@@ -8,6 +8,7 @@ const Allocator = mem.Allocator;
 
 pub const Elf = @import("Context/Elf.zig");
 pub const MachO = @import("Context/MachO.zig");
+pub const Wasm = @import("Context/Wasm.zig");
 
 tag: Tag,
 data: []const u8,
@@ -15,6 +16,7 @@ data: []const u8,
 pub const Tag = enum {
     elf,
     macho,
+    wasm,
 };
 
 pub fn cast(base: *Context, comptime T: type) ?*T {
@@ -48,6 +50,11 @@ pub fn destroy(base: *Context, gpa: Allocator) void {
             parent.deinit(gpa);
             gpa.destroy(parent);
         },
+        .wasm => {
+            const parent = @fieldParentPtr(Wasm, "base", base);
+            parent.deinit(gpa);
+            gpa.destroy(parent);
+        },
     }
 }
 
@@ -58,6 +65,9 @@ pub fn parse(gpa: Allocator, data: []const u8) !*Context {
     if (MachO.isMachOFile(data)) {
         return &(try MachO.parse(gpa, data)).base;
     }
+    if (Wasm.isWasmFile(data)) {
+        return &(try Wasm.parse(gpa, data)).base;
+    }
     return error.UnknownFileFormat;
 }
 
@@ -65,6 +75,7 @@ pub fn getDebugInfoData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugInfoData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugInfoData(),
+        .wasm => @fieldParentPtr(Wasm, "base", base).getDebugInfoData(),
     };
 }
 
@@ -72,6 +83,7 @@ pub fn getDebugStringData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugStringData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugStringData(),
+        .wasm => @fieldParentPtr(Wasm, "base", base).getDebugStringData(),
     };
 }
 
@@ -79,6 +91,7 @@ pub fn getDebugAbbrevData(base: *const Context) ?[]const u8 {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getDebugAbbrevData(),
         .macho => @fieldParentPtr(MachO, "base", base).getDebugAbbrevData(),
+        .wasm => @fieldParentPtr(Wasm, "base", base).getDebugAbbrevData(),
     };
 }
 
@@ -86,6 +99,7 @@ pub fn getArch(base: *const Context) ?std.Target.Cpu.Arch {
     return switch (base.tag) {
         .elf => @fieldParentPtr(Elf, "base", base).getArch(),
         .macho => @fieldParentPtr(MachO, "base", base).getArch(),
+        .wasm => .wasm32,
     };
 }
 pub fn getDwarfString(base: *const Context, off: u64) []const u8 {

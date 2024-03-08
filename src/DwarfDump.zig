@@ -373,6 +373,7 @@ pub fn printEhFrames(self: DwarfDump, writer: anytype, llvm_compatibility: bool)
                 }
             }
         },
+        .wasm => {}, // WebAssembly does not have the eh_frame section
     }
 }
 
@@ -397,16 +398,16 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
         cies.deinit();
     }
 
-    var stream = std.io.fixedBufferStream(section.data);
-    while (stream.pos < stream.buffer.len) {
-        const entry_header = try dwarf.EntryHeader.read(&stream, section.frame_type, write_options.endian);
+    var stream: std.dwarf.FixedBufferReader = .{ .buf = section.data, .endian = write_options.endian };
+    while (stream.pos < stream.buf.len) {
+        const entry_header = try dwarf.EntryHeader.read(&stream, section.frame_type);
         switch (entry_header.type) {
             .cie => {
                 const cie = try dwarf.CommonInformationEntry.parse(
                     entry_header.entry_bytes,
                     @as(i64, @intCast(section.offset)) - @as(i64, @intCast(@intFromPtr(section.data.ptr))),
                     false,
-                    entry_header.is_64,
+                    entry_header.format,
                     section.frame_type,
                     entry_header.length_offset,
                     write_options.addr_size,
@@ -440,8 +441,8 @@ pub fn printEhFrame(self: DwarfDump, writer: anytype, llvm_compatibility: bool, 
     }
 }
 
-fn headerFormat(is_64: bool) []const u8 {
-    return if (is_64) "{x:0>16}" else "{x:0>8}";
+fn headerFormat(format: std.dwarf.Format) []const u8 {
+    return if (format == .@"64") "{x:0>16}" else "{x:0>8}";
 }
 
 fn writeCie(
@@ -451,18 +452,18 @@ fn writeCie(
     cie_with_header: *CieWithHeader,
 ) !void {
     const expression_context = dwarf.expressions.ExpressionContext{
-        .is_64 = cie_with_header.header.is_64,
+        .format = cie_with_header.header.format,
     };
 
-    switch (cie_with_header.header.is_64) {
-        inline else => |is_64| {
-            const length_fmt = comptime headerFormat(is_64);
+    switch (cie_with_header.header.format) {
+        inline else => |format| {
+            const length_fmt = comptime headerFormat(format);
             try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " CIE\n", .{
                 cie_with_header.cie.length_offset,
                 cie_with_header.header.entryLength(),
                 @as(u64, switch (options.frame_type) {
                     .eh_frame => dwarf.CommonInformationEntry.eh_id,
-                    .debug_frame => if (is_64) dwarf.CommonInformationEntry.dwarf64_id else dwarf.CommonInformationEntry.dwarf32_id,
+                    .debug_frame => if (format == .@"64") dwarf.CommonInformationEntry.dwarf64_id else dwarf.CommonInformationEntry.dwarf32_id,
                     else => unreachable,
                 }),
             });
@@ -470,7 +471,7 @@ fn writeCie(
     }
 
     const cie = &cie_with_header.cie;
-    try writeFormat(writer, cie_with_header.header.is_64, true);
+    try writeFormat(writer, cie_with_header.header.format, true);
     try writer.print("  {s: <23}{}\n", .{ "Version:", cie.version });
     try writer.print("  {s: <23}\"{s}\"\n", .{ "Augmentation:", cie.aug_str });
     if (cie_with_header.cie.version == 4) {
@@ -549,18 +550,18 @@ fn writeFde(
 ) !void {
     const cie = &cie_with_header.cie;
     const expression_context = dwarf.expressions.ExpressionContext{
-        .is_64 = cie.is_64,
+        .format = cie.format,
     };
 
     // TODO: Print <invalid offset> for cie if it didn't point to an actual CIE
-    switch (cie_with_header.header.is_64) {
-        inline else => |is_64| {
-            const length_fmt = comptime headerFormat(is_64);
+    switch (cie_with_header.header.format) {
+        inline else => |format| {
+            const length_fmt = comptime headerFormat(format);
             try writer.print("{x:0>8} " ++ length_fmt ++ " " ++ length_fmt ++ " FDE cie={x:0>8} pc={x:0>8}...{x:0>8}\n", .{
                 header.length_offset,
                 header.entryLength(),
                 switch (options.frame_type) {
-                    .eh_frame => (header.length_offset + @as(u8, if (header.is_64) 12 else 4)) - fde.cie_length_offset,
+                    .eh_frame => (header.length_offset + @as(u8, if (header.format == .@"64") 12 else 4)) - fde.cie_length_offset,
                     .debug_frame => fde.cie_length_offset,
                     else => unreachable,
                 },
@@ -571,7 +572,7 @@ fn writeFde(
         },
     }
 
-    try writeFormat(writer, cie_with_header.header.is_64, false);
+    try writeFormat(writer, cie_with_header.header.format, false);
     if (fde.lsda_pointer) |p| try writer.print("  LSDA Address: {x:0>16}\n", .{p});
 
     if (!options.llvm_compatibility) {
@@ -876,8 +877,8 @@ fn writeOperands(
     }
 }
 
-fn writeFormat(writer: anytype, is_64: bool, comptime is_cie: bool) !void {
-    try writer.print("  {s: <" ++ (if (is_cie) "23" else "14") ++ "}{s}\n", .{ "Format:", if (is_64) "DWARF64" else "DWARF32" });
+fn writeFormat(writer: anytype, format: std.dwarf.Format, comptime is_cie: bool) !void {
+    try writer.print("  {s: <" ++ (if (is_cie) "23" else "14") ++ "}{s}\n", .{ "Format:", if (format == .@"64") "DWARF64" else "DWARF32" });
 }
 
 fn writeUnknownReg(writer: anytype, reg_number: u8) !void {

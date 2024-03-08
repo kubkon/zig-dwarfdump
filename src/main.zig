@@ -136,14 +136,20 @@ pub fn main() !void {
         try stdout.writeAll("\n");
     }
     if (print_matrix.eh_frame) {
-        try stdout.print("{s}:\tfile format {s}{s}\n", .{ fname, switch (dd.ctx.tag) {
-            .elf => "elf64-",
-            .macho => "Mach-O ",
-        }, if (dd.ctx.getArch()) |arch| switch (arch) {
-            .x86_64 => "x86_64",
-            .aarch64 => "arm64",
-            else => @tagName(arch),
-        } else "unknown" });
+        try stdout.print("{s}:\tfile format {s}{s}\n", .{
+            fname,
+            switch (dd.ctx.tag) {
+                .elf => "elf64-",
+                .macho => "Mach-O ",
+                .wasm => "Wasm",
+            },
+            if (dd.ctx.getArch()) |arch| switch (arch) {
+                .x86_64 => "x86_64",
+                .aarch64 => "arm64",
+                .wasm32 => "", // wasm arch does not require any printing
+                else => @tagName(arch),
+            } else "unknown",
+        });
 
         try dd.printEhFrames(stdout, llvm_compat);
         try stdout.writeAll("\n");
